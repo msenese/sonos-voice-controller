@@ -278,6 +278,13 @@ def api_train_record():
             ["sudo", "systemctl", "start", "ei-runner.service"],
             capture_output=True, text=True, timeout=15,
         )
+        # sonos-controller.service Requires=ei-runner.service, so stopping
+        # ei-runner also stops it; starting ei-runner back up does not bring
+        # it back automatically, so restart it explicitly too.
+        subprocess.run(
+            ["sudo", "systemctl", "restart", "sonos-controller.service"],
+            capture_output=True, text=True, timeout=15,
+        )
 
     if error:
         return jsonify({"error": error}), 500

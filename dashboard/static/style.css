@@ -16,6 +16,8 @@
   --status-good:     #0ca30c;
   --status-warning:  #fab219;
   --status-critical: #d03b3b;
+
+  --accent-violet: #4a3aa7;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -37,6 +39,8 @@
     --status-good:     #0ca30c;
     --status-warning:  #fab219;
     --status-critical: #e66767;
+
+    --accent-violet: #9085e9;
   }
 }
 
@@ -111,6 +115,27 @@ h1 {
   letter-spacing: 0.04em;
   color: var(--text-secondary);
   margin: 0 0 14px;
+}
+
+.workflow-group {
+  border: 1px solid color-mix(in srgb, var(--accent-violet) 35%, transparent);
+  border-radius: 12px;
+  padding: 16px 16px 4px;
+  margin-bottom: 16px;
+  background: color-mix(in srgb, var(--accent-violet) 5%, var(--page-plane));
+}
+
+.workflow-group-label {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--accent-violet);
+  margin-bottom: 12px;
+}
+
+.workflow-group .card:last-child {
+  margin-bottom: 0;
 }
 
 .meter-row {
