@@ -1,0 +1,12 @@
+[Unit]
+Description=Edge Impulse Linux Runner
+After=network.target sound.target
+
+[Service]
+User=msenese
+ExecStart=/usr/bin/edge-impulse-linux-runner --model-file /home/msenese/sonos-model.eim --disable-camera
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

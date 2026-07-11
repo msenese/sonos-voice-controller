@@ -1,0 +1,96 @@
+<title>Sonos Voice Controller</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+
+<div class="wrap">
+  <header>
+    <h1>Sonos Voice Controller</h1>
+    <div class="badges">
+      <span class="badge" id="connection-badge"><span class="dot"></span><span id="connection-text">unknown</span></span>
+      <span class="badge" id="mute-badge"><span class="dot"></span><span id="mute-text">mute: unknown</span></span>
+    </div>
+  </header>
+
+  <div class="card">
+    <h2>Live Scores</h2>
+    <div id="meters"></div>
+  </div>
+
+  <div class="grid-2">
+    <div class="card">
+      <h2>Last Detected</h2>
+      <div id="last-detected" class="empty">No detections yet</div>
+    </div>
+    <div class="card">
+      <h2>System Status</h2>
+      <div class="stat-tiles">
+        <div class="stat-tile">
+          <div class="stat-value" id="stat-uptime">&mdash;</div>
+          <div class="stat-label">Uptime</div>
+        </div>
+        <div class="stat-tile">
+          <div class="stat-value" id="stat-temp">&mdash;</div>
+          <div class="stat-label">CPU Temp</div>
+        </div>
+        <div class="stat-tile">
+          <div class="stat-value" id="stat-mem">&mdash;</div>
+          <div class="stat-label">Memory</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Detection History</h2>
+    <ul class="history-list" id="history-list">
+      <li class="empty">No detections yet</li>
+    </ul>
+  </div>
+
+  <div class="grid-2">
+    <div class="card">
+      <h2>Thresholds</h2>
+      <div class="field">
+        <div class="field-head"><span>Sonos Pause threshold</span><span class="value" id="threshold-value">&mdash;</span></div>
+        <input type="range" id="threshold" min="0" max="1" step="0.01">
+      </div>
+      <div class="field">
+        <div class="field-head"><span>Sonos Play threshold</span><span class="value" id="sonos_play_threshold-value">&mdash;</span></div>
+        <input type="range" id="sonos_play_threshold" min="0" max="1" step="0.01">
+      </div>
+      <div class="field">
+        <div class="field-head"><span>Cooldown (s)</span><span class="value" id="cooldown-value">&mdash;</span></div>
+        <input type="range" id="cooldown" min="0" max="10" step="0.5">
+      </div>
+      <div class="field">
+        <div class="field-head"><span>Consecutive required</span><span class="value" id="consecutive_required-value">&mdash;</span></div>
+        <input type="range" id="consecutive_required" min="1" max="10" step="1">
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Mic Capture Level</h2>
+      <div class="field">
+        <div class="field-head"><span>Capture (0-63)</span><span class="value" id="mic-level-value">50</span></div>
+        <input type="range" id="mic-level" min="0" max="63" step="1" value="50">
+      </div>
+      <div class="status-line">Applies immediately via amixer. Resets to 50 on controller restart.</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Training Mode</h2>
+    <div class="train-row">
+      <select id="train-label">
+        {% for label in labels %}
+        <option value="{{ label }}">{{ label }}</option>
+        {% endfor %}
+      </select>
+      <input type="number" id="train-duration" min="1" max="5" step="0.5" value="2"> s
+      <button id="train-record" class="primary">Record</button>
+      <button id="train-upload" disabled>Upload to Edge Impulse</button>
+    </div>
+    <div class="status-line" id="train-status">No recording yet.</div>
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>

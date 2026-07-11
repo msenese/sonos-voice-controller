@@ -1,0 +1,8 @@
+config.py
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.wav
+training_samples/
+.DS_Store
