@@ -1,10 +1,14 @@
 import importlib
+import io
+import json
 import re
 import subprocess
 import sys
 import time
+import zipfile
 from pathlib import Path
 
+import requests
 from flask import Flask, jsonify, render_template, request
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -15,6 +19,14 @@ STATE_FILE = Path("/tmp/sonos_controller_state.json")
 TRAINING_DIR = PROJECT_ROOT / "training_samples"
 CONFIG_PATH = PROJECT_ROOT / "config.py"
 AUDIO_DEVICE = "hw:1,0"
+
+LIVE_MODEL_PATH = PROJECT_ROOT / "sonos-model.eim"
+MODEL_BACKUP_PATH = PROJECT_ROOT / "sonos-model.eim.bak"
+PENDING_MODEL_PATH = PROJECT_ROOT / "sonos-model-pending.eim"
+SAMPLE_BASELINE_PATH = PROJECT_ROOT / "sample_counts_baseline.json"
+EI_API_BASE = "https://studio.edgeimpulse.com/v1/api"
+EI_BUILD_TARGET = "runner-linux-aarch64"
+EI_BUILD_ENGINE = "tflite"
 
 LABELS = ["noise", "sonos pause", "sonos play", "unknown"]
 
@@ -40,6 +52,54 @@ def reload_config():
     importlib.reload(cfg)
 
 
+def ei_configured():
+    key = getattr(cfg, "EI_API_KEY", None)
+    project_id = getattr(cfg, "EI_PROJECT_ID", None)
+    return (
+        bool(key) and key != "your-edge-impulse-api-key-here"
+        and bool(project_id) and project_id != "your-project-id-here"
+    )
+
+
+def ei_headers():
+    return {"x-api-key": cfg.EI_API_KEY}
+
+
+def ei_admin_configured():
+    key = getattr(cfg, "EI_ADMIN_API_KEY", None)
+    return bool(key) and key != "your-edge-impulse-admin-api-key-here"
+
+
+def ei_admin_headers():
+    return {"x-api-key": cfg.EI_ADMIN_API_KEY}
+
+
+class EIError(Exception):
+    pass
+
+
+def ei_json(response):
+    if "json" not in response.headers.get("Content-Type", ""):
+        raise EIError(f"Edge Impulse API error (HTTP {response.status_code}): {response.text[:300]}")
+    data = response.json()
+    if data.get("success") is False:
+        raise EIError(data.get("error", f"Edge Impulse API call failed (HTTP {response.status_code})"))
+    return data
+
+
+def fetch_sample_counts():
+    counts = {}
+    for label in LABELS:
+        data = ei_json(requests.get(
+            f"{EI_API_BASE}/{cfg.EI_PROJECT_ID}/raw-data/count",
+            headers=ei_headers(),
+            params={"category": "all", "labels": json.dumps([label])},
+            timeout=15,
+        ))
+        counts[label] = data["count"]
+    return counts
+
+
 def read_state():
     if not STATE_FILE.exists():
         return {
@@ -50,7 +110,6 @@ def read_state():
             "updated_at": None,
         }
     try:
-        import json
         return json.loads(STATE_FILE.read_text())
     except (OSError, ValueError):
         return {
@@ -228,7 +287,6 @@ def api_train_upload():
     if label not in LABELS:
         return jsonify({"error": "could not determine label from filename"}), 400
 
-    import requests
     with path.open("rb") as f:
         response = requests.post(
             "https://ingestion.edgeimpulse.com/api/training/files",
@@ -244,6 +302,186 @@ def api_train_upload():
         return jsonify({"error": f"Edge Impulse upload failed: {response.status_code} {response.text}"}), 502
 
     return jsonify({"uploaded": filename, "label": label})
+
+
+@app.route("/api/model/sample-counts")
+def api_model_sample_counts():
+    if not ei_configured():
+        return jsonify({"error": "EI_API_KEY / EI_PROJECT_ID not configured in config.py"}), 400
+    try:
+        counts = fetch_sample_counts()
+    except EIError as e:
+        return jsonify({"error": str(e)}), 502
+
+    baseline = {}
+    baseline_at = None
+    if SAMPLE_BASELINE_PATH.exists():
+        try:
+            snapshot = json.loads(SAMPLE_BASELINE_PATH.read_text())
+            baseline = snapshot.get("counts", {})
+            baseline_at = snapshot.get("snapshot_at")
+        except (OSError, ValueError):
+            pass
+
+    return jsonify({
+        "counts": {
+            label: {"total": count, "new": count - baseline.get(label, count)}
+            for label, count in counts.items()
+        },
+        "baseline_at": baseline_at,
+    })
+
+
+@app.route("/api/model/sample-counts/snapshot", methods=["POST"])
+def api_model_sample_counts_snapshot():
+    if not ei_configured():
+        return jsonify({"error": "EI_API_KEY / EI_PROJECT_ID not configured in config.py"}), 400
+    try:
+        counts = fetch_sample_counts()
+    except EIError as e:
+        return jsonify({"error": str(e)}), 502
+
+    snapshot = {"counts": counts, "snapshot_at": time.time()}
+    SAMPLE_BASELINE_PATH.write_text(json.dumps(snapshot))
+    return jsonify(snapshot)
+
+
+@app.route("/api/model/retrain/start", methods=["POST"])
+def api_model_retrain_start():
+    if not ei_configured():
+        return jsonify({"error": "EI_API_KEY / EI_PROJECT_ID not configured in config.py"}), 400
+    if not ei_admin_configured():
+        return jsonify({"error": "EI_ADMIN_API_KEY not configured in config.py (retrain requires an Admin-role key)"}), 400
+    try:
+        data = ei_json(requests.post(
+            f"{EI_API_BASE}/{cfg.EI_PROJECT_ID}/jobs/retrain",
+            headers=ei_admin_headers(), timeout=15,
+        ))
+    except EIError as e:
+        return jsonify({"error": str(e)}), 502
+    return jsonify({"job_id": data["id"]})
+
+
+@app.route("/api/model/build/start", methods=["POST"])
+def api_model_build_start():
+    if not ei_configured():
+        return jsonify({"error": "EI_API_KEY / EI_PROJECT_ID not configured in config.py"}), 400
+    try:
+        data = ei_json(requests.post(
+            f"{EI_API_BASE}/{cfg.EI_PROJECT_ID}/jobs/build-ondevice-model",
+            headers=ei_headers(),
+            params={"type": EI_BUILD_TARGET},
+            json={"engine": EI_BUILD_ENGINE},
+            timeout=15,
+        ))
+    except EIError as e:
+        return jsonify({"error": str(e)}), 502
+    return jsonify({"job_id": data["id"]})
+
+
+@app.route("/api/model/job/<int:job_id>/status")
+def api_model_job_status(job_id):
+    if not ei_configured():
+        return jsonify({"error": "EI_API_KEY / EI_PROJECT_ID not configured in config.py"}), 400
+    try:
+        data = ei_json(requests.get(
+            f"{EI_API_BASE}/{cfg.EI_PROJECT_ID}/jobs/{job_id}/status",
+            headers=ei_headers(), timeout=15,
+        ))
+    except EIError as e:
+        return jsonify({"error": str(e)}), 502
+    job = data.get("job", {})
+    return jsonify({
+        "finished": bool(job.get("finished")),
+        "finishedSuccessful": job.get("finishedSuccessful"),
+    })
+
+
+@app.route("/api/model/metrics")
+def api_model_metrics():
+    if not ei_configured():
+        return jsonify({"error": "EI_API_KEY / EI_PROJECT_ID not configured in config.py"}), 400
+    try:
+        impulse_data = ei_json(requests.get(
+            f"{EI_API_BASE}/{cfg.EI_PROJECT_ID}/impulse",
+            headers=ei_headers(), timeout=15,
+        ))
+        learn_blocks = impulse_data.get("impulse", {}).get("learnBlocks", [])
+        keras_block = next((b for b in learn_blocks if b.get("type") == "keras"), None)
+        if not keras_block:
+            return jsonify({"error": "no keras learn block found on this impulse"}), 404
+
+        metadata = ei_json(requests.get(
+            f"{EI_API_BASE}/{cfg.EI_PROJECT_ID}/training/keras/{keras_block['id']}/metadata",
+            headers=ei_headers(), timeout=15,
+        ))
+    except EIError as e:
+        return jsonify({"error": str(e)}), 502
+    return jsonify({
+        "classNames": metadata.get("classNames", []),
+        "modelValidationMetrics": metadata.get("modelValidationMetrics", []),
+    })
+
+
+@app.route("/api/model/download", methods=["POST"])
+def api_model_download():
+    if not ei_configured():
+        return jsonify({"error": "EI_API_KEY / EI_PROJECT_ID not configured in config.py"}), 400
+    r = requests.get(
+        f"{EI_API_BASE}/{cfg.EI_PROJECT_ID}/deployment/download",
+        headers=ei_headers(),
+        params={"type": EI_BUILD_TARGET},
+        timeout=120,
+    )
+    if r.status_code != 200:
+        return jsonify({"error": f"download failed (HTTP {r.status_code}): {r.text[:300]}"}), 502
+
+    if r.content[:2] == b"PK":
+        # Some deployment targets (e.g. C++ library) return a zip; the EIM
+        # runner target returns the raw binary directly (checked below).
+        zf = zipfile.ZipFile(io.BytesIO(r.content))
+        eim_names = [n for n in zf.namelist() if n.endswith(".eim")]
+        if not eim_names:
+            return jsonify({"error": "no .eim file found in deployment zip"}), 502
+        data = zf.read(eim_names[0])
+    elif r.content[:4] == b"\x7fELF":
+        data = r.content
+    else:
+        return jsonify({"error": f"unrecognized deployment response format (first bytes: {r.content[:16]!r})"}), 502
+
+    PENDING_MODEL_PATH.write_bytes(data)
+    PENDING_MODEL_PATH.chmod(0o755)
+    return jsonify({"size": len(data)})
+
+
+@app.route("/api/model/pending")
+def api_model_pending():
+    if not PENDING_MODEL_PATH.exists():
+        return jsonify({"exists": False})
+    st = PENDING_MODEL_PATH.stat()
+    return jsonify({"exists": True, "size": st.st_size, "mtime": st.st_mtime})
+
+
+@app.route("/api/model/activate", methods=["POST"])
+def api_model_activate():
+    if not PENDING_MODEL_PATH.exists():
+        return jsonify({"error": "no pending model to activate"}), 400
+
+    if LIVE_MODEL_PATH.exists():
+        MODEL_BACKUP_PATH.write_bytes(LIVE_MODEL_PATH.read_bytes())
+    PENDING_MODEL_PATH.replace(LIVE_MODEL_PATH)
+
+    try:
+        result = subprocess.run(
+            ["sudo", "systemctl", "restart", "ei-runner.service"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except OSError as e:
+        return jsonify({"error": f"model file swapped, but restart failed: {e}"}), 500
+    if result.returncode != 0:
+        return jsonify({"error": f"model file swapped, but restart failed: {result.stderr.strip()}"}), 500
+
+    return jsonify({"activated": True})
 
 
 if __name__ == "__main__":

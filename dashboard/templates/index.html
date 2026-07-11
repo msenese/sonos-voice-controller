@@ -78,6 +78,41 @@
   </div>
 
   <div class="card">
+    <h2>Retrain &amp; Deploy Model</h2>
+    <div id="sample-counts">
+      {% for label in labels %}
+      <div class="meter-row" style="grid-template-columns: 110px 1fr;">
+        <div class="meter-label">{{ label }}</div>
+        <div class="meter-value" id="sample-count-{{ loop.index0 }}" style="text-align:left;">&mdash;</div>
+      </div>
+      {% endfor %}
+    </div>
+    <div class="status-line" id="sample-counts-status" style="margin-bottom:12px;">Loading sample counts...</div>
+    <div class="train-row">
+      <button id="model-retrain" class="primary">1. Retrain Model</button>
+      <button id="model-build" disabled>2. Build &amp; Download for Pi</button>
+      <button id="model-activate" disabled>3. Activate New Model</button>
+    </div>
+    <div class="status-line" id="model-status">Retrains on your current Edge Impulse dataset, then lets you review accuracy before deploying to the Pi.</div>
+
+    <div id="model-metrics" style="display:none; margin-top:14px;">
+      <div class="stat-tiles" style="grid-template-columns: repeat(2, 1fr); margin-bottom: 14px;">
+        <div class="stat-tile">
+          <div class="stat-value" id="model-accuracy">&mdash;</div>
+          <div class="stat-label">Validation Accuracy</div>
+        </div>
+        <div class="stat-tile">
+          <div class="stat-value" id="model-loss">&mdash;</div>
+          <div class="stat-label">Loss</div>
+        </div>
+      </div>
+      <div style="overflow-x:auto;">
+        <table id="confusion-matrix" style="border-collapse: collapse; font-size: 12px;"></table>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
     <h2>Training Mode</h2>
     <div class="train-row">
       <select id="train-label">

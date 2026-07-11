@@ -6,3 +6,7 @@ venv/
 *.wav
 training_samples/
 .DS_Store
+sample_counts_baseline.json
+sonos-model-pending.eim
+sonos-model.eim.bak
+*.eim

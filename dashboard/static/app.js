@@ -214,13 +214,149 @@ uploadBtn.addEventListener("click", async () => {
     }
     trainStatus.textContent = `Uploaded ${data.uploaded} as "${data.label}".`;
     lastRecordedFilename = null;
+    loadSampleCounts();
   } catch (e) {
     trainStatus.textContent = `Error: ${e}`;
     uploadBtn.disabled = false;
   }
 });
 
+async function loadSampleCounts() {
+  const statusEl = document.getElementById("sample-counts-status");
+  try {
+    const res = await fetch("/api/model/sample-counts");
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    LABEL_ORDER.forEach((label, i) => {
+      const info = data.counts[label];
+      const el = document.getElementById(`sample-count-${i}`);
+      if (!info) { el.textContent = "—"; return; }
+      const sign = info.new > 0 ? "+" : "";
+      el.textContent = info.new !== 0 ? `${info.total} (${sign}${info.new} new)` : `${info.total}`;
+    });
+    statusEl.textContent = data.baseline_at
+      ? `"New" counts are since the last retrain.`
+      : `Retrain once to start tracking "new since last retrain".`;
+  } catch (e) {
+    statusEl.textContent = `Could not load sample counts: ${e.message}`;
+  }
+}
+
+const modelStatus = document.getElementById("model-status");
+const retrainBtn = document.getElementById("model-retrain");
+const buildBtn = document.getElementById("model-build");
+const activateBtn = document.getElementById("model-activate");
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function pollJob(jobId) {
+  while (true) {
+    await sleep(2000);
+    const res = await fetch(`/api/model/job/${jobId}/status`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "job status check failed");
+    if (data.finished) return data.finishedSuccessful;
+  }
+}
+
+function renderConfusionMatrix(classNames, matrix) {
+  const flat = matrix.flat();
+  const max = Math.max(...flat, 1);
+  const table = document.getElementById("confusion-matrix");
+  let html = "<tr><th></th>" + classNames.map(c => `<th style="padding:4px 8px;font-weight:600;">${c}</th>`).join("") + "</tr>";
+  matrix.forEach((row, i) => {
+    html += `<tr><th style="padding:4px 8px;text-align:right;font-weight:600;">${classNames[i] || ""}</th>`;
+    row.forEach(value => {
+      const alpha = 0.12 + 0.8 * (value / max);
+      const color = alpha > 0.55 ? "#fff" : "var(--text-primary)";
+      html += `<td style="padding:6px 10px;text-align:center;background:rgba(42,120,214,${alpha});color:${color};">${value}</td>`;
+    });
+    html += "</tr>";
+  });
+  table.innerHTML = html;
+}
+
+async function loadModelMetrics() {
+  const res = await fetch("/api/model/metrics");
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || "failed to load metrics");
+  const metrics = (data.modelValidationMetrics || [])[0];
+  if (!metrics) throw new Error("no validation metrics available");
+  document.getElementById("model-accuracy").textContent = `${(metrics.accuracy * 100).toFixed(1)}%`;
+  document.getElementById("model-loss").textContent = metrics.loss.toFixed(3);
+  renderConfusionMatrix(data.classNames, metrics.confusionMatrix);
+  document.getElementById("model-metrics").style.display = "block";
+}
+
+retrainBtn.addEventListener("click", async () => {
+  retrainBtn.disabled = true;
+  buildBtn.disabled = true;
+  activateBtn.disabled = true;
+  document.getElementById("model-metrics").style.display = "none";
+  modelStatus.textContent = "Starting retrain job...";
+  try {
+    const startRes = await fetch("/api/model/retrain/start", { method: "POST" });
+    const startData = await startRes.json();
+    if (!startRes.ok) throw new Error(startData.error);
+    modelStatus.textContent = "Retraining on current dataset (this can take a few minutes)...";
+    const success = await pollJob(startData.job_id);
+    if (!success) throw new Error("retrain job did not finish successfully");
+    modelStatus.textContent = "Retrain complete. Loading accuracy...";
+    await loadModelMetrics();
+    await fetch("/api/model/sample-counts/snapshot", { method: "POST" });
+    await loadSampleCounts();
+    modelStatus.textContent = "Retrain complete. Review the results, then build for the Pi.";
+    buildBtn.disabled = false;
+  } catch (e) {
+    modelStatus.textContent = `Error: ${e.message}`;
+  } finally {
+    retrainBtn.disabled = false;
+  }
+});
+
+buildBtn.addEventListener("click", async () => {
+  buildBtn.disabled = true;
+  activateBtn.disabled = true;
+  modelStatus.textContent = "Starting build job...";
+  try {
+    const startRes = await fetch("/api/model/build/start", { method: "POST" });
+    const startData = await startRes.json();
+    if (!startRes.ok) throw new Error(startData.error);
+    modelStatus.textContent = "Building deployment for Linux (AARCH64)...";
+    const success = await pollJob(startData.job_id);
+    if (!success) throw new Error("build job did not finish successfully");
+    modelStatus.textContent = "Build complete. Downloading to the Pi...";
+    const dlRes = await fetch("/api/model/download", { method: "POST" });
+    const dlData = await dlRes.json();
+    if (!dlRes.ok) throw new Error(dlData.error);
+    modelStatus.textContent = `Downloaded new model (${(dlData.size / 1024).toFixed(0)} KB). Ready to activate.`;
+    activateBtn.disabled = false;
+  } catch (e) {
+    modelStatus.textContent = `Error: ${e.message}`;
+    buildBtn.disabled = false;
+  }
+});
+
+activateBtn.addEventListener("click", async () => {
+  const ok = confirm("This will replace the live model and restart the keyword-spotting service for a few seconds. Continue?");
+  if (!ok) return;
+  activateBtn.disabled = true;
+  modelStatus.textContent = "Activating new model...";
+  try {
+    const res = await fetch("/api/model/activate", { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    modelStatus.textContent = "New model activated and ei-runner restarted.";
+  } catch (e) {
+    modelStatus.textContent = `Error: ${e.message}`;
+    activateBtn.disabled = false;
+  }
+});
+
 pollState();
 pollSystem();
+loadSampleCounts();
 setInterval(pollState, 1000);
 setInterval(pollSystem, 5000);
