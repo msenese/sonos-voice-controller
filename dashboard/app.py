@@ -18,7 +18,7 @@ import config as cfg  # noqa: E402
 STATE_FILE = Path("/tmp/sonos_controller_state.json")
 TRAINING_DIR = PROJECT_ROOT / "training_samples"
 CONFIG_PATH = PROJECT_ROOT / "config.py"
-AUDIO_DEVICE = "hw:1,0"
+AUDIO_DEVICE = "plughw:1,0"
 
 LIVE_MODEL_PATH = PROJECT_ROOT / "sonos-model.eim"
 MODEL_BACKUP_PATH = PROJECT_ROOT / "sonos-model.eim.bak"
@@ -250,17 +250,37 @@ def api_train_record():
     filename = f"{label_to_slug(label)}__{int(time.time())}.wav"
     path = TRAINING_DIR / filename
 
+    # ei-runner.service holds the mic open continuously, so arecord can't
+    # also open it. Stop it for the duration of the recording, then always
+    # bring it back even if recording fails.
+    stop_result = subprocess.run(
+        ["sudo", "systemctl", "stop", "ei-runner.service"],
+        capture_output=True, text=True, timeout=15,
+    )
+    if stop_result.returncode != 0:
+        return jsonify({"error": f"could not stop ei-runner.service: {stop_result.stderr.strip()}"}), 500
+
+    result = None
+    error = None
     try:
         result = subprocess.run(
             [
                 "arecord", "-D", AUDIO_DEVICE,
                 "-f", "S16_LE", "-c", "1", "-r", "16000",
-                "-d", str(duration), str(path),
+                "-d", str(round(duration)), str(path),
             ],
             capture_output=True, text=True,
         )
     except OSError as e:
-        return jsonify({"error": f"could not run arecord: {e}"}), 500
+        error = f"could not run arecord: {e}"
+    finally:
+        subprocess.run(
+            ["sudo", "systemctl", "start", "ei-runner.service"],
+            capture_output=True, text=True, timeout=15,
+        )
+
+    if error:
+        return jsonify({"error": error}), 500
     if result.returncode != 0:
         return jsonify({"error": result.stderr.strip() or "arecord failed"}), 500
 

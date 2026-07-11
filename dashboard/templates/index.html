@@ -120,11 +120,11 @@
         <option value="{{ label }}">{{ label }}</option>
         {% endfor %}
       </select>
-      <input type="number" id="train-duration" min="1" max="5" step="0.5" value="2"> s
+      <input type="number" id="train-duration" min="1" max="5" step="1" value="2"> s
       <button id="train-record" class="primary">Record</button>
       <button id="train-upload" disabled>Upload to Edge Impulse</button>
     </div>
-    <div class="status-line" id="train-status">No recording yet.</div>
+    <div class="status-line" id="train-status">No recording yet. Recording briefly pauses live keyword spotting (the mic can only be open by one process at a time).</div>
   </div>
 </div>
 
