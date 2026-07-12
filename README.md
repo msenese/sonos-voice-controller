@@ -49,7 +49,7 @@ dashboard take effect within a moment, no restart needed.
    ```
 
    ```python
-   HA_URL = "http://10.0.0.240:8123"
+   HA_URL = "http://192.168.50.212:8123"
    HA_TOKEN = "your-token-here"        # Long-lived access token from HA
    EI_WS_URL = "ws://localhost:4912"
    SONOS_ENTITY = "media_player.office_1"
