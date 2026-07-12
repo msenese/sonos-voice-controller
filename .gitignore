@@ -7,6 +7,9 @@ venv/
 training_samples/
 .DS_Store
 sample_counts_baseline.json
-sonos-model-pending.eim
-sonos-model.eim.bak
-*.eim
+
+# Transient model artifacts at the repo root (deployed to the Pi directly,
+# not version-controlled) -- models/ is where tracked models live.
+/sonos-model.eim
+/sonos-model-pending.eim
+/sonos-model-previous.eim

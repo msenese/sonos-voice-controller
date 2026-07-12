@@ -631,13 +631,16 @@ function renderConfusionMatrix(classNames, matrix) {
   table.innerHTML = html;
 }
 
+let lastModelAccuracy = null;
+
 async function loadModelMetrics() {
   const res = await fetch("/api/model/metrics");
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || "failed to load metrics");
   const metrics = (data.modelValidationMetrics || [])[0];
   if (!metrics) throw new Error("no validation metrics available");
-  document.getElementById("model-accuracy").textContent = `${(metrics.accuracy * 100).toFixed(1)}%`;
+  lastModelAccuracy = metrics.accuracy * 100;
+  document.getElementById("model-accuracy").textContent = `${lastModelAccuracy.toFixed(1)}%`;
   document.getElementById("model-loss").textContent = metrics.loss.toFixed(3);
   renderConfusionMatrix(data.classNames, metrics.confusionMatrix);
   document.getElementById("model-metrics").style.display = "block";
@@ -698,10 +701,17 @@ activateBtn.addEventListener("click", async () => {
   activateBtn.disabled = true;
   modelStatus.textContent = "Activating new model...";
   try {
-    const res = await fetch("/api/model/activate", { method: "POST" });
+    const res = await fetch("/api/model/activate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ accuracy: lastModelAccuracy }),
+    });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error);
-    modelStatus.textContent = "New model activated and ei-runner restarted.";
+    const archive = data.archive || {};
+    modelStatus.textContent = archive.archived
+      ? `New model activated and ei-runner restarted. Archived to git as ${archive.filename}.`
+      : `New model activated and ei-runner restarted. Git archive failed: ${archive.error || "unknown error"}`;
   } catch (e) {
     modelStatus.textContent = `Error: ${e.message}`;
     activateBtn.disabled = false;

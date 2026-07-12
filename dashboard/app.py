@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 import zipfile
+from datetime import date
 from pathlib import Path
 
 import requests
@@ -21,9 +22,10 @@ CONFIG_PATH = PROJECT_ROOT / "config.py"
 AUDIO_DEVICE = "plughw:1,0"
 
 LIVE_MODEL_PATH = PROJECT_ROOT / "sonos-model.eim"
-MODEL_BACKUP_PATH = PROJECT_ROOT / "sonos-model.eim.bak"
+MODEL_BACKUP_PATH = PROJECT_ROOT / "sonos-model-previous.eim"
 PENDING_MODEL_PATH = PROJECT_ROOT / "sonos-model-pending.eim"
 SAMPLE_BASELINE_PATH = PROJECT_ROOT / "sample_counts_baseline.json"
+GIT_ARCHIVE_REPO = Path.home() / "git-archive" / "sonos-voice-controller"
 EI_API_BASE = "https://studio.edgeimpulse.com/v1/api"
 EI_BUILD_TARGET = "runner-linux-aarch64"
 EI_BUILD_ENGINE = "tflite"
@@ -631,6 +633,46 @@ def api_model_pending():
     return jsonify({"exists": True, "size": st.st_size, "mtime": st.st_mtime})
 
 
+def archive_model_to_git(accuracy=None):
+    if not GIT_ARCHIVE_REPO.exists():
+        return {"archived": False, "error": "git archive clone not found on the Pi"}
+
+    models_dir = GIT_ARCHIVE_REPO / "models"
+    models_dir.mkdir(exist_ok=True)
+    today = date.today().isoformat()
+    dated_name = f"sonos-model-{today}.eim"
+
+    try:
+        data = LIVE_MODEL_PATH.read_bytes()
+        (models_dir / dated_name).write_bytes(data)
+        (models_dir / "sonos-model-current.eim").write_bytes(data)
+
+        def run(*args, **kwargs):
+            return subprocess.run(
+                ["git", "-C", str(GIT_ARCHIVE_REPO), *args],
+                capture_output=True, text=True, timeout=kwargs.get("timeout", 20),
+            )
+
+        pull = run("pull", "--ff-only", timeout=30)
+        if pull.returncode != 0:
+            return {"archived": False, "error": f"git pull failed: {pull.stderr.strip()}"}
+
+        run("add", f"models/{dated_name}", "models/sonos-model-current.eim")
+
+        acc_str = f" - {accuracy:.1f}% accuracy" if accuracy is not None else ""
+        commit = run("commit", "-m", f"Auto-archive model activated {today}{acc_str}")
+        if commit.returncode != 0 and "nothing to commit" not in commit.stdout:
+            return {"archived": False, "error": f"git commit failed: {commit.stderr.strip() or commit.stdout.strip()}"}
+
+        push = run("push", timeout=30)
+        if push.returncode != 0:
+            return {"archived": False, "error": f"git push failed: {push.stderr.strip()}"}
+
+        return {"archived": True, "filename": dated_name}
+    except OSError as e:
+        return {"archived": False, "error": str(e)}
+
+
 @app.route("/api/model/activate", methods=["POST"])
 def api_model_activate():
     if not PENDING_MODEL_PATH.exists():
@@ -650,7 +692,11 @@ def api_model_activate():
     if result.returncode != 0:
         return jsonify({"error": f"model file swapped, but restart failed: {result.stderr.strip()}"}), 500
 
-    return jsonify({"activated": True})
+    body = request.get_json(silent=True) or {}
+    accuracy = body.get("accuracy")
+    archive_result = archive_model_to_git(accuracy if isinstance(accuracy, (int, float)) else None)
+
+    return jsonify({"activated": True, "archive": archive_result})
 
 
 if __name__ == "__main__":
