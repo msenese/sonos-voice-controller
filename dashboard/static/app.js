@@ -171,40 +171,76 @@ micSlider.addEventListener("change", async () => {
 let lastRecordedFilename = null;
 const trainStatus = document.getElementById("train-status");
 const uploadBtn = document.getElementById("train-upload");
+const recordBtn = document.getElementById("train-record");
 
-document.getElementById("train-record").addEventListener("click", async () => {
+recordBtn.addEventListener("click", async () => {
   const label = document.getElementById("train-label").value;
   const duration = Number(document.getElementById("train-duration").value);
-  trainStatus.textContent = `Recording ${duration}s of "${label}"...`;
+  recordBtn.disabled = true;
   uploadBtn.disabled = true;
+  trainStatus.textContent = "Getting ready (pausing keyword spotting)...";
+
+  let data;
   try {
-    const res = await fetch("/api/train/record", {
+    const res = await fetch("/api/train/record/start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ label, duration }),
     });
-    const data = await res.json();
-    if (!res.ok) {
-      trainStatus.textContent = `Error: ${data.error}`;
-      return;
+    data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+  } catch (e) {
+    trainStatus.textContent = `Error: ${e.message}`;
+    recordBtn.disabled = false;
+    return;
+  }
+
+  // The response above only arrives once arecord has actually started, but
+  // network/JS/reaction-time slack could still eat into the capture window,
+  // so the recording includes a silent pre-roll before we ask you to speak.
+  const preroll = data.preroll || 0;
+  if (preroll > 0) {
+    trainStatus.textContent = "Get ready...";
+    await new Promise(resolve => setTimeout(resolve, preroll * 1000));
+  }
+
+  let remaining = duration;
+  trainStatus.textContent = `🔴 Recording now — say "${label}"! ${remaining}s`;
+  const tick = setInterval(() => {
+    remaining -= 1;
+    if (remaining > 0) {
+      trainStatus.textContent = `🔴 Recording now — say "${label}"! ${remaining}s`;
     }
-    lastRecordedFilename = data.filename;
-    trainStatus.textContent = `Recorded ${data.filename}. Ready to upload.`;
+  }, 1000);
+
+  await new Promise(resolve => setTimeout(resolve, duration * 1000));
+  clearInterval(tick);
+  trainStatus.textContent = "Finishing up (resuming keyword spotting)...";
+
+  try {
+    const res = await fetch("/api/train/record/finish", { method: "POST" });
+    const finishData = await res.json();
+    if (!res.ok) throw new Error(finishData.error);
+    lastRecordedFilename = finishData.filename;
+    trainStatus.textContent = `Recorded ${finishData.filename}. Ready to upload.`;
     uploadBtn.disabled = false;
   } catch (e) {
-    trainStatus.textContent = `Error: ${e}`;
+    trainStatus.textContent = `Error: ${e.message}`;
+  } finally {
+    recordBtn.disabled = false;
   }
 });
 
 uploadBtn.addEventListener("click", async () => {
   if (!lastRecordedFilename) return;
-  trainStatus.textContent = `Uploading ${lastRecordedFilename}...`;
+  const uploadedFilename = lastRecordedFilename;
+  trainStatus.textContent = `Uploading ${uploadedFilename}...`;
   uploadBtn.disabled = true;
   try {
     const res = await fetch("/api/train/upload", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ filename: lastRecordedFilename }),
+      body: JSON.stringify({ filename: uploadedFilename }),
     });
     const data = await res.json();
     if (!res.ok) {
@@ -215,9 +251,326 @@ uploadBtn.addEventListener("click", async () => {
     trainStatus.textContent = `Uploaded ${data.uploaded} as "${data.label}".`;
     lastRecordedFilename = null;
     loadSampleCounts();
+    openSegmentReview(uploadedFilename);
   } catch (e) {
     trainStatus.textContent = `Error: ${e}`;
     uploadBtn.disabled = false;
+  }
+});
+
+// --- Sample segment review (waveform + draggable boundaries) ---
+
+const segmentReviewEl = document.getElementById("segment-review");
+const segmentStatus = document.getElementById("segment-status");
+const segmentAudio = document.getElementById("segment-audio");
+const segmentLengthInput = document.getElementById("segment-length");
+const findSegmentsBtn = document.getElementById("find-segments-btn");
+const addSegmentBtn = document.getElementById("add-segment-btn");
+const splitBtn = document.getElementById("split-samples-btn");
+const waveformCanvas = document.getElementById("waveform-canvas");
+const waveformCtx = waveformCanvas.getContext("2d");
+
+let audioBuffer = null;
+let totalDurationMs = 0;
+let segments = [];
+let currentSampleId = null;
+let currentFilename = null;
+let draggingHandle = null;
+let segmentPlaybackHandler = null;
+
+const PLAY_ICON_Y = 18;
+const PLAY_ICON_R = 9;
+
+function cssVar(name) {
+  return getComputedStyle(document.body).getPropertyValue(name).trim();
+}
+
+function msToX(ms) {
+  return totalDurationMs ? (ms / totalDurationMs) * waveformCanvas.width : 0;
+}
+
+function xToMs(x) {
+  return totalDurationMs ? (x / waveformCanvas.width) * totalDurationMs : 0;
+}
+
+function canvasPoint(e) {
+  const rect = waveformCanvas.getBoundingClientRect();
+  return {
+    x: (e.clientX - rect.left) * (waveformCanvas.width / rect.width),
+    y: (e.clientY - rect.top) * (waveformCanvas.height / rect.height),
+  };
+}
+
+function drawWaveform() {
+  const width = waveformCanvas.width;
+  const height = waveformCanvas.height;
+  waveformCtx.clearRect(0, 0, width, height);
+
+  if (audioBuffer) {
+    const data = audioBuffer.getChannelData(0);
+    const step = Math.max(1, Math.floor(data.length / width));
+    const mid = height / 2;
+    waveformCtx.strokeStyle = cssVar("--series-1") || "#2a78d6";
+    waveformCtx.lineWidth = 1;
+    for (let x = 0; x < width; x++) {
+      let min = 1.0, max = -1.0;
+      const start = x * step;
+      for (let i = 0; i < step; i++) {
+        const v = data[start + i];
+        if (v === undefined) break;
+        if (v < min) min = v;
+        if (v > max) max = v;
+      }
+      waveformCtx.beginPath();
+      waveformCtx.moveTo(x + 0.5, mid + min * mid);
+      waveformCtx.lineTo(x + 0.5, mid + max * mid);
+      waveformCtx.stroke();
+    }
+  }
+
+  segments.forEach((seg, i) => {
+    const x1 = msToX(seg.startMs);
+    const x2 = msToX(seg.endMs);
+    waveformCtx.fillStyle = "rgba(27, 175, 122, 0.18)";
+    waveformCtx.fillRect(x1, 0, x2 - x1, height);
+    waveformCtx.fillStyle = "#1baf7a";
+    waveformCtx.fillRect(x1 - 2, 0, 4, height);
+    waveformCtx.fillRect(x2 - 2, 0, 4, height);
+
+    // Play button for previewing just this segment's range.
+    const midX = (x1 + x2) / 2;
+    waveformCtx.beginPath();
+    waveformCtx.arc(midX, PLAY_ICON_Y, PLAY_ICON_R, 0, Math.PI * 2);
+    waveformCtx.fillStyle = "rgba(0, 0, 0, 0.55)";
+    waveformCtx.fill();
+    waveformCtx.beginPath();
+    waveformCtx.moveTo(midX - 3, PLAY_ICON_Y - 4.5);
+    waveformCtx.lineTo(midX - 3, PLAY_ICON_Y + 4.5);
+    waveformCtx.lineTo(midX + 4, PLAY_ICON_Y);
+    waveformCtx.closePath();
+    waveformCtx.fillStyle = "#ffffff";
+    waveformCtx.fill();
+
+    waveformCtx.fillStyle = cssVar("--text-primary") || "#fff";
+    waveformCtx.font = "11px sans-serif";
+    waveformCtx.fillText(`#${i + 1}`, x1 + 4, height - 6);
+  });
+}
+
+function playSegment(seg) {
+  if (segmentPlaybackHandler) {
+    segmentAudio.removeEventListener("timeupdate", segmentPlaybackHandler);
+    segmentPlaybackHandler = null;
+  }
+  segmentAudio.currentTime = seg.startMs / 1000;
+  segmentAudio.play();
+  const stopAt = seg.endMs / 1000;
+  segmentPlaybackHandler = () => {
+    if (segmentAudio.currentTime >= stopAt) {
+      segmentAudio.pause();
+      segmentAudio.removeEventListener("timeupdate", segmentPlaybackHandler);
+      segmentPlaybackHandler = null;
+    }
+  };
+  segmentAudio.addEventListener("timeupdate", segmentPlaybackHandler);
+}
+
+function hitTest(point) {
+  const HIT = 8;
+  for (let i = 0; i < segments.length; i++) {
+    const x1 = msToX(segments[i].startMs);
+    const x2 = msToX(segments[i].endMs);
+    const midX = (x1 + x2) / 2;
+    if (Math.hypot(point.x - midX, point.y - PLAY_ICON_Y) <= PLAY_ICON_R + 2) {
+      return { i, edge: "play" };
+    }
+  }
+  for (let i = 0; i < segments.length; i++) {
+    if (Math.abs(point.x - msToX(segments[i].startMs)) <= HIT) return { i, edge: "start" };
+    if (Math.abs(point.x - msToX(segments[i].endMs)) <= HIT) return { i, edge: "end" };
+  }
+  for (let i = 0; i < segments.length; i++) {
+    const x1 = msToX(segments[i].startMs);
+    const x2 = msToX(segments[i].endMs);
+    if (point.x > x1 + HIT && point.x < x2 - HIT) {
+      return { i, edge: "move", grabOffsetMs: xToMs(point.x) - segments[i].startMs };
+    }
+  }
+  return null;
+}
+
+waveformCanvas.addEventListener("pointerdown", (e) => {
+  const hit = hitTest(canvasPoint(e));
+  if (!hit) return;
+  if (hit.edge === "play") {
+    playSegment(segments[hit.i]);
+    return;
+  }
+  draggingHandle = hit;
+});
+
+waveformCanvas.addEventListener("pointermove", (e) => {
+  const point = canvasPoint(e);
+  if (!draggingHandle) {
+    const hit = hitTest(point);
+    waveformCanvas.style.cursor = hit
+      ? (hit.edge === "play" ? "pointer" : hit.edge === "move" ? "grab" : "ew-resize")
+      : "default";
+    return;
+  }
+  const ms = Math.max(0, Math.min(totalDurationMs, xToMs(point.x)));
+  const seg = segments[draggingHandle.i];
+  if (draggingHandle.edge === "start") {
+    seg.startMs = Math.min(ms, seg.endMs - 50);
+  } else if (draggingHandle.edge === "end") {
+    seg.endMs = Math.max(ms, seg.startMs + 50);
+  } else if (draggingHandle.edge === "move") {
+    const width = seg.endMs - seg.startMs;
+    let newStart = ms - draggingHandle.grabOffsetMs;
+    newStart = Math.max(0, Math.min(totalDurationMs - width, newStart));
+    seg.startMs = newStart;
+    seg.endMs = newStart + width;
+  }
+  drawWaveform();
+});
+
+window.addEventListener("pointerup", () => { draggingHandle = null; });
+
+waveformCanvas.addEventListener("dblclick", (e) => {
+  const ms = xToMs(canvasPoint(e).x);
+  const idx = segments.findIndex(s => ms >= s.startMs && ms <= s.endMs);
+  if (idx >= 0) {
+    segments.splice(idx, 1);
+    drawWaveform();
+    splitBtn.disabled = segments.length === 0;
+  }
+});
+
+segmentLengthInput.addEventListener("input", () => {
+  document.getElementById("segment-length-value").textContent = segmentLengthInput.value;
+});
+
+async function lookupSampleId(filename, attempts = 15, delayMs = 2000) {
+  for (let i = 0; i < attempts; i++) {
+    const res = await fetch(`/api/train/samples/lookup?filename=${encodeURIComponent(filename)}`);
+    const data = await res.json();
+    if (res.ok) return data.sample_id;
+    if (i < attempts - 1) await new Promise(r => setTimeout(r, delayMs));
+  }
+  throw new Error("could not find uploaded sample on Edge Impulse yet — longer recordings can take a while to process, try \"Find Segments\" again in a bit");
+}
+
+async function openSegmentReview(filename) {
+  segments = [];
+  currentSampleId = null;
+  currentFilename = filename;
+  audioBuffer = null;
+  totalDurationMs = 0;
+  splitBtn.disabled = true;
+  segmentReviewEl.style.display = "block";
+  segmentAudio.src = `/training-samples/${filename}`;
+  segmentStatus.textContent = "Loading waveform...";
+  drawWaveform();
+
+  try {
+    const resp = await fetch(`/training-samples/${filename}`);
+    const arrayBuf = await resp.arrayBuffer();
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    const audioCtx = new AudioCtx();
+    audioBuffer = await audioCtx.decodeAudioData(arrayBuf);
+    totalDurationMs = audioBuffer.duration * 1000;
+    drawWaveform();
+  } catch (e) {
+    segmentStatus.textContent = `Could not load waveform: ${e.message}`;
+    return;
+  }
+
+  segmentStatus.textContent = "Looking up sample on Edge Impulse (can take a bit for longer recordings)...";
+  try {
+    currentSampleId = await lookupSampleId(filename);
+    segmentStatus.textContent = 'Ready. Click "Find Segments" or use "Add Segment" to mark boundaries manually. Click the ▶ on a segment to preview it.';
+  } catch (e) {
+    segmentStatus.textContent = `${e.message}`;
+  }
+}
+
+findSegmentsBtn.addEventListener("click", async () => {
+  if (!currentSampleId) {
+    segmentStatus.textContent = "Looking up sample on Edge Impulse...";
+    try {
+      currentSampleId = await lookupSampleId(currentFilename, 3, 1500);
+    } catch (e) {
+      segmentStatus.textContent = e.message;
+      return;
+    }
+  }
+  const segmentLengthMs = Number(segmentLengthInput.value);
+  segmentStatus.textContent = "Finding segments...";
+  try {
+    const res = await fetch(`/api/train/samples/${currentSampleId}/find-segments`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ segment_length_ms: segmentLengthMs, shift_segments: false }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    segments = data.segments;
+    drawWaveform();
+    splitBtn.disabled = segments.length === 0;
+    segmentStatus.textContent = `Found ${segments.length} segment(s). Drag green handles to adjust, double-click a segment to remove it.`;
+  } catch (e) {
+    segmentStatus.textContent = `Error: ${e.message}`;
+  }
+});
+
+addSegmentBtn.addEventListener("click", () => {
+  if (!totalDurationMs) return;
+  const segmentLengthMs = Number(segmentLengthInput.value);
+  const start = Math.max(0, totalDurationMs / 2 - segmentLengthMs / 2);
+  segments.push({ startMs: start, endMs: Math.min(totalDurationMs, start + segmentLengthMs) });
+  drawWaveform();
+  splitBtn.disabled = false;
+});
+
+splitBtn.addEventListener("click", async () => {
+  if (segments.length === 0) return;
+  if (!currentSampleId) {
+    segmentStatus.textContent = "Looking up sample on Edge Impulse...";
+    try {
+      currentSampleId = await lookupSampleId(currentFilename, 3, 1500);
+    } catch (e) {
+      segmentStatus.textContent = e.message;
+      return;
+    }
+  }
+  const ok = confirm(`Split & save ${segments.length} sample(s) to Edge Impulse? The original recording will be deleted there (recoverable via cold storage) and its local copy on the Pi will be removed too.`);
+  if (!ok) return;
+  splitBtn.disabled = true;
+  segmentStatus.textContent = "Splitting...";
+  try {
+    const res = await fetch(`/api/train/samples/${currentSampleId}/segment`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        segments: segments.map(s => ({ startMs: Math.round(s.startMs), endMs: Math.round(s.endMs) })),
+        filename: currentFilename,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    trainStatus.textContent = data.original_deleted
+      ? `Split into ${data.split} sample(s) and removed the original recording.`
+      : `Split into ${data.split} sample(s), but could not remove the original recording — delete it manually in Edge Impulse Studio to keep it out of training.`;
+    loadSampleCounts();
+    segmentReviewEl.style.display = "none";
+    segments = [];
+    currentSampleId = null;
+    currentFilename = null;
+    audioBuffer = null;
+    totalDurationMs = 0;
+  } catch (e) {
+    segmentStatus.textContent = `Error: ${e.message}`;
+    splitBtn.disabled = false;
   }
 });
 

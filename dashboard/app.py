@@ -9,7 +9,7 @@ import zipfile
 from pathlib import Path
 
 import requests
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, send_from_directory
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -233,8 +233,29 @@ def api_system():
     })
 
 
-@app.route("/api/train/record", methods=["POST"])
-def api_train_record():
+_active_recording = {"proc": None, "filename": None, "label": None, "duration": None, "capture_duration": None}
+PREROLL_SECONDS = 1
+
+
+def _resume_listening_services():
+    subprocess.run(
+        ["sudo", "systemctl", "start", "ei-runner.service"],
+        capture_output=True, text=True, timeout=15,
+    )
+    # sonos-controller.service Requires=ei-runner.service, so stopping
+    # ei-runner also stops it; starting ei-runner back up does not bring
+    # it back automatically, so restart it explicitly too.
+    subprocess.run(
+        ["sudo", "systemctl", "restart", "sonos-controller.service"],
+        capture_output=True, text=True, timeout=15,
+    )
+
+
+@app.route("/api/train/record/start", methods=["POST"])
+def api_train_record_start():
+    if _active_recording["proc"] is not None:
+        return jsonify({"error": "a recording is already in progress"}), 409
+
     body = request.get_json(silent=True) or {}
     label = body.get("label")
     if label not in LABELS:
@@ -243,8 +264,8 @@ def api_train_record():
         duration = float(body.get("duration", 2))
     except (TypeError, ValueError):
         return jsonify({"error": "invalid duration"}), 400
-    if not (1 <= duration <= 5):
-        return jsonify({"error": "duration must be between 1 and 5 seconds"}), 400
+    if not (1 <= duration <= 20):
+        return jsonify({"error": "duration must be between 1 and 20 seconds"}), 400
 
     TRAINING_DIR.mkdir(parents=True, exist_ok=True)
     filename = f"{label_to_slug(label)}__{int(time.time())}.wav"
@@ -252,7 +273,7 @@ def api_train_record():
 
     # ei-runner.service holds the mic open continuously, so arecord can't
     # also open it. Stop it for the duration of the recording, then always
-    # bring it back even if recording fails.
+    # bring it back once /finish is called.
     stop_result = subprocess.run(
         ["sudo", "systemctl", "stop", "ei-runner.service"],
         capture_output=True, text=True, timeout=15,
@@ -260,37 +281,57 @@ def api_train_record():
     if stop_result.returncode != 0:
         return jsonify({"error": f"could not stop ei-runner.service: {stop_result.stderr.strip()}"}), 500
 
-    result = None
-    error = None
+    # A silent pre-roll absorbs the network round-trip + human reaction time
+    # between "recording started" and the user actually speaking, so the
+    # start of the word never gets clipped.
+    capture_duration = round(duration) + PREROLL_SECONDS
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             [
                 "arecord", "-D", AUDIO_DEVICE,
                 "-f", "S16_LE", "-c", "1", "-r", "16000",
-                "-d", str(round(duration)), str(path),
+                "-d", str(capture_duration), str(path),
             ],
-            capture_output=True, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
     except OSError as e:
-        error = f"could not run arecord: {e}"
+        _resume_listening_services()
+        return jsonify({"error": f"could not run arecord: {e}"}), 500
+
+    _active_recording.update({
+        "proc": proc, "filename": filename, "label": label,
+        "duration": duration, "capture_duration": capture_duration,
+    })
+    return jsonify({"filename": filename, "label": label, "duration": duration, "preroll": PREROLL_SECONDS})
+
+
+@app.route("/api/train/record/finish", methods=["POST"])
+def api_train_record_finish():
+    proc = _active_recording["proc"]
+    if proc is None:
+        return jsonify({"error": "no recording in progress"}), 400
+
+    duration = _active_recording["duration"]
+    capture_duration = _active_recording["capture_duration"]
+    filename = _active_recording["filename"]
+    label = _active_recording["label"]
+
+    try:
+        _, stderr = proc.communicate(timeout=capture_duration + 10)
+        returncode = proc.returncode
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        _, stderr = proc.communicate()
+        returncode = -1
     finally:
-        subprocess.run(
-            ["sudo", "systemctl", "start", "ei-runner.service"],
-            capture_output=True, text=True, timeout=15,
-        )
-        # sonos-controller.service Requires=ei-runner.service, so stopping
-        # ei-runner also stops it; starting ei-runner back up does not bring
-        # it back automatically, so restart it explicitly too.
-        subprocess.run(
-            ["sudo", "systemctl", "restart", "sonos-controller.service"],
-            capture_output=True, text=True, timeout=15,
-        )
+        _resume_listening_services()
+        _active_recording.update({
+            "proc": None, "filename": None, "label": None,
+            "duration": None, "capture_duration": None,
+        })
 
-    if error:
-        return jsonify({"error": error}), 500
-    if result.returncode != 0:
-        return jsonify({"error": result.stderr.strip() or "arecord failed"}), 500
-
+    if returncode != 0:
+        return jsonify({"error": (stderr or "arecord failed").strip()}), 500
     return jsonify({"filename": filename, "label": label, "duration": duration})
 
 
@@ -329,6 +370,107 @@ def api_train_upload():
         return jsonify({"error": f"Edge Impulse upload failed: {response.status_code} {response.text}"}), 502
 
     return jsonify({"uploaded": filename, "label": label})
+
+
+@app.route("/training-samples/<path:filename>")
+def training_sample_file(filename):
+    return send_from_directory(TRAINING_DIR, filename)
+
+
+@app.route("/api/train/samples/lookup")
+def api_train_samples_lookup():
+    if not ei_configured():
+        return jsonify({"error": "EI_API_KEY / EI_PROJECT_ID not configured in config.py"}), 400
+    filename = request.args.get("filename", "")
+    if not filename or Path(filename).name != filename:
+        return jsonify({"error": "invalid filename"}), 400
+
+    # Edge Impulse stores the filename without its extension.
+    filename_stem = Path(filename).stem
+
+    try:
+        data = ei_json(requests.get(
+            f"{EI_API_BASE}/{cfg.EI_PROJECT_ID}/raw-data",
+            headers=ei_headers(),
+            params={"category": "all", "filename": filename_stem},
+            timeout=15,
+        ))
+    except EIError as e:
+        return jsonify({"error": str(e)}), 502
+
+    samples = data.get("samples", [])
+    if not samples:
+        return jsonify({"error": "sample not found on Edge Impulse yet (upload may still be processing)"}), 404
+    match = next((s for s in samples if s.get("filename") == filename_stem), samples[0])
+    return jsonify({"sample_id": match["id"]})
+
+
+@app.route("/api/train/samples/<int:sample_id>/find-segments", methods=["POST"])
+def api_train_find_segments(sample_id):
+    if not ei_admin_configured():
+        return jsonify({"error": "EI_ADMIN_API_KEY not configured in config.py (find-segments requires an Admin-role key)"}), 400
+    body = request.get_json(silent=True) or {}
+    try:
+        segment_length_ms = int(body.get("segment_length_ms", 1000))
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid segment_length_ms"}), 400
+    if not (100 <= segment_length_ms <= 10000):
+        return jsonify({"error": "segment_length_ms must be between 100 and 10000"}), 400
+
+    try:
+        data = ei_json(requests.post(
+            f"{EI_API_BASE}/{cfg.EI_PROJECT_ID}/raw-data/{sample_id}/find-segments",
+            headers=ei_admin_headers(),
+            json={"shiftSegments": bool(body.get("shift_segments", False)), "segmentLengthMs": segment_length_ms},
+            timeout=30,
+        ))
+    except EIError as e:
+        return jsonify({"error": str(e)}), 502
+    return jsonify({"segments": data.get("segments", [])})
+
+
+@app.route("/api/train/samples/<int:sample_id>/segment", methods=["POST"])
+def api_train_segment(sample_id):
+    if not ei_admin_configured():
+        return jsonify({"error": "EI_ADMIN_API_KEY not configured in config.py (segment requires an Admin-role key)"}), 400
+    body = request.get_json(silent=True) or {}
+    segments = body.get("segments")
+    if not isinstance(segments, list) or not segments:
+        return jsonify({"error": "segments must be a non-empty list"}), 400
+    for seg in segments:
+        if not isinstance(seg, dict) or "startMs" not in seg or "endMs" not in seg:
+            return jsonify({"error": "each segment needs startMs and endMs"}), 400
+
+    try:
+        ei_json(requests.post(
+            f"{EI_API_BASE}/{cfg.EI_PROJECT_ID}/raw-data/{sample_id}/segment",
+            headers=ei_admin_headers(),
+            json={"segments": segments},
+            timeout=30,
+        ))
+    except EIError as e:
+        return jsonify({"error": str(e)}), 502
+
+    # The segment API's docs claim the original sample is auto-deleted, but in
+    # practice it stays fully active (isDisabled: False) unless removed here,
+    # which would otherwise pollute training with the raw multi-word clip.
+    original_deleted = True
+    try:
+        ei_json(requests.delete(
+            f"{EI_API_BASE}/{cfg.EI_PROJECT_ID}/raw-data/{sample_id}",
+            headers=ei_admin_headers(),
+            timeout=15,
+        ))
+    except EIError:
+        original_deleted = False
+
+    # Its segments now live on Edge Impulse, so the raw local copy on the Pi
+    # has no further purpose.
+    filename = body.get("filename", "")
+    if filename and Path(filename).name == filename:
+        (TRAINING_DIR / filename).unlink(missing_ok=True)
+
+    return jsonify({"split": len(segments), "original_deleted": original_deleted})
 
 
 @app.route("/api/model/sample-counts")
