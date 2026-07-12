@@ -1,0 +1,13 @@
+[Unit]
+Description=Sonos Voice Controller Dashboard
+After=network.target
+
+[Service]
+User=msenese
+WorkingDirectory=/home/msenese/dashboard
+ExecStart=/usr/bin/python3 -u /home/msenese/dashboard/app.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
