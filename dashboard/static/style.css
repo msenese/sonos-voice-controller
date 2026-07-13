@@ -285,6 +285,26 @@ button.primary {
   font-variant-numeric: tabular-nums;
 }
 
+.capture-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.capture-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.capture-actions button {
+  padding: 3px 9px;
+  font-size: 12px;
+}
+
+button.correct { border-color: var(--status-good); color: var(--status-good); }
+button.false-trigger { border-color: var(--status-critical); color: var(--status-critical); }
+
 .empty {
   color: var(--muted);
   font-size: 13px;

@@ -26,6 +26,8 @@ MODEL_BACKUP_PATH = PROJECT_ROOT / "sonos-model-previous.eim"
 PENDING_MODEL_PATH = PROJECT_ROOT / "sonos-model-pending.eim"
 SAMPLE_BASELINE_PATH = PROJECT_ROOT / "sample_counts_baseline.json"
 GIT_ARCHIVE_REPO = Path.home() / "git-archive" / "sonos-voice-controller"
+CAPTURE_DIR = Path("/home/msenese/trigger-captures")
+AUDIO_BUFFER_API = "http://localhost:8081"
 EI_API_BASE = "https://studio.edgeimpulse.com/v1/api"
 EI_BUILD_TARGET = "runner-linux-aarch64"
 EI_BUILD_ENGINE = "tflite"
@@ -357,17 +359,7 @@ def api_train_upload():
     if label not in LABELS:
         return jsonify({"error": "could not determine label from filename"}), 400
 
-    with path.open("rb") as f:
-        response = requests.post(
-            "https://ingestion.edgeimpulse.com/api/training/files",
-            headers={
-                "x-api-key": cfg.EI_API_KEY,
-                "x-label": label,
-            },
-            files={"data": (filename, f, "audio/wav")},
-            timeout=30,
-        )
-
+    response = upload_wav_to_ei(path, filename, label)
     if response.status_code >= 300:
         return jsonify({"error": f"Edge Impulse upload failed: {response.status_code} {response.text}"}), 502
 
@@ -377,6 +369,71 @@ def api_train_upload():
 @app.route("/training-samples/<path:filename>")
 def training_sample_file(filename):
     return send_from_directory(TRAINING_DIR, filename)
+
+
+def upload_wav_to_ei(path, filename, label):
+    with path.open("rb") as f:
+        return requests.post(
+            "https://ingestion.edgeimpulse.com/api/training/files",
+            headers={
+                "x-api-key": cfg.EI_API_KEY,
+                "x-label": label,
+            },
+            files={"data": (filename, f, "audio/wav")},
+            timeout=30,
+        )
+
+
+@app.route("/trigger-captures/<path:filename>")
+def trigger_capture_file(filename):
+    return send_from_directory(CAPTURE_DIR, filename)
+
+
+@app.route("/api/captures")
+def api_captures():
+    try:
+        r = requests.get(f"{AUDIO_BUFFER_API}/captures", timeout=10)
+    except requests.RequestException as e:
+        return jsonify({"error": f"could not reach audio-buffer service: {e}"}), 502
+    if r.status_code >= 300:
+        return jsonify({"error": f"audio-buffer service error: {r.status_code} {r.text}"}), 502
+    return jsonify(r.json())
+
+
+@app.route("/api/captures/<path:filename>", methods=["DELETE"])
+def api_captures_delete(filename):
+    if Path(filename).name != filename:
+        return jsonify({"error": "invalid filename"}), 400
+    try:
+        r = requests.delete(f"{AUDIO_BUFFER_API}/captures/{filename}", timeout=10)
+    except requests.RequestException as e:
+        return jsonify({"error": f"could not reach audio-buffer service: {e}"}), 502
+    if r.status_code >= 300:
+        return jsonify({"error": f"audio-buffer service error: {r.status_code} {r.text}"}), 502
+    return jsonify(r.json())
+
+
+@app.route("/api/captures/<path:filename>/false-trigger", methods=["POST"])
+def api_captures_false_trigger(filename):
+    if not getattr(cfg, "EI_API_KEY", None) or cfg.EI_API_KEY == "your-edge-impulse-api-key-here":
+        return jsonify({"error": "EI_API_KEY is not configured in config.py"}), 400
+    if Path(filename).name != filename:
+        return jsonify({"error": "invalid filename"}), 400
+
+    path = CAPTURE_DIR / filename
+    if not path.is_file():
+        return jsonify({"error": "file not found"}), 404
+
+    response = upload_wav_to_ei(path, filename, "unknown")
+    if response.status_code >= 300:
+        return jsonify({"error": f"Edge Impulse upload failed: {response.status_code} {response.text}"}), 502
+
+    try:
+        requests.delete(f"{AUDIO_BUFFER_API}/captures/{filename}", timeout=10)
+    except requests.RequestException as e:
+        return jsonify({"uploaded": filename, "deleted": False, "delete_error": str(e)})
+
+    return jsonify({"uploaded": filename, "deleted": True})
 
 
 @app.route("/api/train/samples/lookup")

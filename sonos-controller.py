@@ -34,7 +34,36 @@ spi = spidev.SpiDev()
 spi.open(0, 0)
 spi.max_speed_hz = 1000000
 
-time.sleep(15)
+def set_leds(r, g, b):
+    start = [0x00, 0x00, 0x00, 0x00]
+    leds = [0xFF, b, g, r] * 3
+    end = [0xFF, 0xFF, 0xFF, 0xFF]
+    spi.xfer2(start + leds + end)
+
+
+def set_individual_leds(colors):
+    start = [0x00, 0x00, 0x00, 0x00]
+    leds = []
+    for (r, g, b) in colors:
+        leds += [0xFF, b, g, r]
+    end = [0xFF, 0xFF, 0xFF, 0xFF]
+    spi.xfer2(start + leds + end)
+
+
+# Bounces 0-1-2-1 repeating, i.e. "1-2-3-2-1" in 1-indexed LED positions.
+CHASE_SEQUENCE = [0, 1, 2, 1]
+BOOT_COLOR = (30, 10, 0)
+
+
+def chase_frame(index, color=BOOT_COLOR):
+    colors = [(0, 0, 0)] * 3
+    colors[CHASE_SEQUENCE[index % len(CHASE_SEQUENCE)]] = color
+    set_individual_leds(colors)
+
+
+for _ in range(100):
+    chase_frame(_)
+    time.sleep(0.15)
 subprocess.run(['amixer', '-c', '1', 'sset', 'Capture', '50'], capture_output=True)
 
 
@@ -67,20 +96,17 @@ def write_state():
         print(f"[STATE] Failed to write state file: {e}")
 
 
-def set_leds(r, g, b):
-    start = [0x00, 0x00, 0x00, 0x00]
-    leds = [0xFF, b, g, r] * 3
-    end = [0xFF, 0xFF, 0xFF, 0xFF]
-    spi.xfer2(start + leds + end)
-
-
 async def breathe():
     global led_override
     step = 0
     while True:
         if not led_override:
             brightness = max(3, min(25, int((math.sin(step) + 1) / 2 * 45)))
-            set_leds(0, 0, brightness)
+            if is_muted:
+                muted_brightness = max(2, int(brightness * 0.6))
+                set_leds(muted_brightness, int(muted_brightness * 0.4), 0)
+            else:
+                set_leds(0, brightness, int(brightness * 0.8))
             step += 0.04
         await asyncio.sleep(0.05)
 
@@ -94,6 +120,28 @@ async def flash_green():
         set_leds(0, 0, 0)
         await asyncio.sleep(0.1)
     led_override = False
+
+
+async def chase(color=BOOT_COLOR):
+    i = 0
+    try:
+        while True:
+            chase_frame(i, color)
+            i += 1
+            await asyncio.sleep(0.15)
+    except asyncio.CancelledError:
+        pass
+
+
+def post_capture(label, score):
+    try:
+        requests.post(
+            "http://localhost:8081/capture",
+            json={"label": label, "score": score},
+            timeout=2,
+        )
+    except Exception as e:
+        print(f"[CAPTURE] Error: {e}")
 
 
 def trigger_ha(action):
@@ -140,14 +188,38 @@ async def watch_button():
         await asyncio.sleep(0.05)
 
 
-async def listen():
-    global last_trigger_time, consecutive_count, latest_scores, connection_status
+async def poll_mute_state():
+    global is_muted
     while True:
+        try:
+            headers = {
+                "Authorization": f"Bearer {cfg.HA_TOKEN}",
+                "Content-Type": "application/json"
+            }
+            response = requests.get(f"{cfg.HA_URL}/api/states/{cfg.SONOS_ENTITY}", headers=headers)
+            state = response.json()
+            attributes = state.get("attributes", {})
+            volume_muted = attributes.get("is_volume_muted", False)
+            volume_level = attributes.get("volume_level", 1.0)
+            is_muted = bool(volume_muted) or volume_level <= 0.02
+            write_state()
+        except Exception as e:
+            print(f"[HA] Poll error: {e}")
+        await asyncio.sleep(5)
+
+
+async def listen():
+    global last_trigger_time, consecutive_count, latest_scores, connection_status, led_override
+    while True:
+        chase_task = None
         try:
             print("[EI] Attempting to connect to Edge Impulse runner...")
             connection_status = "connecting"
-            set_leds(30, 10, 0)
+            led_override = True
+            chase_task = asyncio.create_task(chase())
             async with websockets.connect(cfg.EI_WS_URL) as ws:
+                chase_task.cancel()
+                led_override = False
                 print("[EI] Connected to Edge Impulse runner")
                 connection_status = "connected"
                 async for message in ws:
@@ -174,11 +246,15 @@ async def listen():
                                             "timestamp": now,
                                         })
                                         trigger_ha(label)
+                                        post_capture(label, score)
                                         await flash_green()
                             else:
                                 consecutive_count[label] = 0
                     write_state()
         except Exception as e:
+            if chase_task is not None:
+                chase_task.cancel()
+            led_override = False
             print(f"[EI] Connection failed: {e}. Retrying in 5 seconds...")
             connection_status = "disconnected"
             write_state()
@@ -187,6 +263,6 @@ async def listen():
 
 
 async def main():
-    await asyncio.gather(breathe(), listen(), watch_button())
+    await asyncio.gather(breathe(), listen(), watch_button(), poll_mute_state())
 
 asyncio.run(main())

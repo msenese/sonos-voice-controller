@@ -718,8 +718,105 @@ activateBtn.addEventListener("click", async () => {
   }
 });
 
+// --- Trigger captures ---
+
+const capturesList = document.getElementById("captures-list");
+const capturesStatus = document.getElementById("captures-status");
+const captureAudio = document.getElementById("capture-audio");
+
+function parseCaptureFilename(filename) {
+  const base = filename.replace(/\.wav$/, "");
+  const parts = base.split("-");
+  const rest = parts.slice(6); // drop the 6-part YYYY-MM-DD-HH-MM-SS timestamp
+  const score = rest[rest.length - 1];
+  const label = rest.slice(0, -1).join(" ");
+  return { label, score: Number(score) };
+}
+
+function playCapture(filename) {
+  captureAudio.src = `/trigger-captures/${filename}`;
+  captureAudio.play();
+}
+
+async function loadCaptures() {
+  try {
+    const res = await fetch("/api/captures");
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    const captures = data.captures || [];
+    if (captures.length === 0) {
+      capturesList.innerHTML = `<li class="empty">No captures yet</li>`;
+      capturesStatus.textContent = "Captures are saved automatically whenever a command triggers.";
+      return;
+    }
+    capturesStatus.textContent = `${captures.length} capture(s), most recent first.`;
+    capturesList.innerHTML = captures.map(c => {
+      const { label, score } = parseCaptureFilename(c.filename);
+      const pct = Number.isFinite(score) ? `${(score * 100).toFixed(0)}%` : "?";
+      return `
+        <li>
+          <span class="capture-row">
+            <button class="play-btn" data-filename="${c.filename}" title="Play">&#9654;</button>
+            <span>${label} (${pct}) &middot; ${timeAgo(c.mtime)}</span>
+          </span>
+          <span class="capture-actions">
+            <button class="correct" data-filename="${c.filename}">&check; Correct</button>
+            <button class="false-trigger" data-filename="${c.filename}">&cross; False trigger</button>
+          </span>
+        </li>
+      `;
+    }).join("");
+  } catch (e) {
+    capturesStatus.textContent = `Could not load captures: ${e.message}`;
+  }
+}
+
+capturesList.addEventListener("click", async (e) => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  const filename = btn.dataset.filename;
+  if (!filename) return;
+
+  if (btn.classList.contains("play-btn")) {
+    playCapture(filename);
+    return;
+  }
+
+  if (btn.classList.contains("correct")) {
+    btn.disabled = true;
+    try {
+      const res = await fetch(`/api/captures/${encodeURIComponent(filename)}`, { method: "DELETE" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      await loadCaptures();
+    } catch (e) {
+      capturesStatus.textContent = `Error: ${e.message}`;
+      btn.disabled = false;
+    }
+    return;
+  }
+
+  if (btn.classList.contains("false-trigger")) {
+    btn.disabled = true;
+    const otherBtn = btn.parentElement.querySelector(".correct");
+    if (otherBtn) otherBtn.disabled = true;
+    try {
+      const res = await fetch(`/api/captures/${encodeURIComponent(filename)}/false-trigger`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      await loadCaptures();
+    } catch (e) {
+      capturesStatus.textContent = `Error: ${e.message}`;
+      btn.disabled = false;
+      if (otherBtn) otherBtn.disabled = false;
+    }
+  }
+});
+
 pollState();
 pollSystem();
 loadSampleCounts();
+loadCaptures();
 setInterval(pollState, 1000);
 setInterval(pollSystem, 5000);
+setInterval(loadCaptures, 5000);
