@@ -4,7 +4,7 @@ After=network.target sound.target
 
 [Service]
 User=msenese
-ExecStart=/usr/bin/edge-impulse-linux-runner --model-file /home/msenese/sonos-model.eim --disable-camera
+ExecStart=/usr/bin/edge-impulse-linux-runner --microphone hw:1,0 --model-file /home/msenese/sonos-model.eim --disable-camera
 Restart=always
 RestartSec=5
 
