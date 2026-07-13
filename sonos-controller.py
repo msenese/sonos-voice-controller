@@ -133,15 +133,22 @@ async def chase(color=BOOT_COLOR):
         pass
 
 
+HA_REQUEST_TIMEOUT = 5
+
+
 def post_capture(label, score):
+    # audio-buffer.service is currently disabled (see services/audio-buffer.service
+    # and the Trigger Captures feature notes) -- connection failures here are
+    # expected until that's re-enabled, so stay silent rather than log noise
+    # on every single detection.
     try:
         requests.post(
             "http://localhost:8081/capture",
             json={"label": label, "score": score},
             timeout=2,
         )
-    except Exception as e:
-        print(f"[CAPTURE] Error: {e}")
+    except Exception:
+        pass
 
 
 def trigger_ha(action):
@@ -149,16 +156,22 @@ def trigger_ha(action):
         "Authorization": f"Bearer {cfg.HA_TOKEN}",
         "Content-Type": "application/json"
     }
-    if action == "sonos pause":
-        requests.post(f"{cfg.HA_URL}/api/services/media_player/media_pause",
+    endpoint = "media_pause" if action == "sonos pause" else "media_play" if action == "sonos play" else None
+    if endpoint is None:
+        return
+    try:
+        response = requests.post(
+            f"{cfg.HA_URL}/api/services/media_player/{endpoint}",
             headers=headers,
-            json={"entity_id": cfg.SONOS_ENTITY})
-        print(f"[HA] Paused Sonos")
-    elif action == "sonos play":
-        requests.post(f"{cfg.HA_URL}/api/services/media_player/media_play",
-            headers=headers,
-            json={"entity_id": cfg.SONOS_ENTITY})
-        print(f"[HA] Played Sonos")
+            json={"entity_id": cfg.SONOS_ENTITY},
+            timeout=HA_REQUEST_TIMEOUT,
+        )
+        if response.status_code >= 300:
+            print(f"[HA] {endpoint} failed: HTTP {response.status_code} {response.text[:200]}")
+        else:
+            print(f"[HA] {'Paused' if action == 'sonos pause' else 'Played'} Sonos")
+    except Exception as e:
+        print(f"[HA] {endpoint} error: {e}")
 
 
 async def watch_button():
@@ -173,12 +186,13 @@ async def watch_button():
                     "Authorization": f"Bearer {cfg.HA_TOKEN}",
                     "Content-Type": "application/json"
                 }
-                response = requests.get(f"{cfg.HA_URL}/api/states/{cfg.SONOS_ENTITY}", headers=headers)
+                response = requests.get(f"{cfg.HA_URL}/api/states/{cfg.SONOS_ENTITY}", headers=headers, timeout=HA_REQUEST_TIMEOUT)
                 state = response.json()
                 is_muted_current = state.get("attributes", {}).get("is_volume_muted", False)
                 requests.post(f"{cfg.HA_URL}/api/services/media_player/volume_mute",
                     headers=headers,
-                    json={"entity_id": cfg.SONOS_ENTITY, "is_volume_muted": not is_muted_current})
+                    json={"entity_id": cfg.SONOS_ENTITY, "is_volume_muted": not is_muted_current},
+                    timeout=HA_REQUEST_TIMEOUT)
                 is_muted = not is_muted_current
                 write_state()
                 await flash_green()
@@ -196,7 +210,7 @@ async def poll_mute_state():
                 "Authorization": f"Bearer {cfg.HA_TOKEN}",
                 "Content-Type": "application/json"
             }
-            response = requests.get(f"{cfg.HA_URL}/api/states/{cfg.SONOS_ENTITY}", headers=headers)
+            response = requests.get(f"{cfg.HA_URL}/api/states/{cfg.SONOS_ENTITY}", headers=headers, timeout=HA_REQUEST_TIMEOUT)
             state = response.json()
             attributes = state.get("attributes", {})
             volume_muted = attributes.get("is_volume_muted", False)

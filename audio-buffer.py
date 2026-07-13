@@ -14,11 +14,17 @@ BUFFER_SECONDS = 3
 BUFFER_SAMPLES = SAMPLE_RATE * BUFFER_SECONDS
 BLOCK_SIZE = 1600  # 100ms per callback
 
-# Shared plug+dsnoop PCM already defined in /etc/asound.conf, confirmed to
-# allow concurrent access alongside ei-runner.service (which is configured
-# with --microphone capture for the same reason). The raw
-# "dsnoop:CARD=wm8960soundcard,DEV=0" hint is NOT usable here -- it creates
-# an uncoordinated second dsnoop instance that collides with this one.
+# NOT CURRENTLY SAFE TO ENABLE. edge-impulse-linux-runner captures audio via
+# sox grabbing its configured hardware device directly and exclusively --
+# it never goes through ALSA's dsnoop/plug sharing layer, regardless of
+# device name. ei-runner.service is pinned to --microphone hw:1,0 (see
+# services/ei-runner.service); this service using "capture" (the shared
+# plug+dsnoop PCM defined in /etc/asound.conf) will still collide with it
+# for the same underlying hw:1,0 slave and take voice control down, exactly
+# as it did in production. A validated fix exists -- ei-runner reads from an
+# snd-aloop loopback device that this service forwards real audio into --
+# but the duplex forwarding logic isn't implemented yet (see tasks 34/35).
+# Do not enable audio-buffer.service until that's built and soak-tested.
 DEVICE = "capture"
 
 CAPTURE_DIR = Path("/home/msenese/trigger-captures")
