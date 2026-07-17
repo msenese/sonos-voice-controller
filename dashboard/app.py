@@ -394,6 +394,13 @@ def trigger_capture_file(filename):
     return send_from_directory(CAPTURE_DIR, filename)
 
 
+def parse_capture_filename(filename):
+    base = filename[:-4] if filename.endswith(".wav") else filename
+    parts = base.split("-")
+    rest = parts[6:]  # drop the 6-part YYYY-MM-DD-HH-MM-SS timestamp
+    return " ".join(rest[:-1])  # drop the trailing score
+
+
 @app.route("/api/captures")
 def api_captures():
     try:
@@ -418,27 +425,41 @@ def api_captures_delete(filename):
     return jsonify(r.json())
 
 
-@app.route("/api/captures/<path:filename>/false-trigger", methods=["POST"])
-def api_captures_false_trigger(filename):
+def _upload_capture_and_remove(filename, label):
     if not getattr(cfg, "EI_API_KEY", None) or cfg.EI_API_KEY == "your-edge-impulse-api-key-here":
         return jsonify({"error": "EI_API_KEY is not configured in config.py"}), 400
     if Path(filename).name != filename:
         return jsonify({"error": "invalid filename"}), 400
+    if label not in LABELS:
+        return jsonify({"error": f"label must be one of {LABELS}"}), 400
 
     path = CAPTURE_DIR / filename
     if not path.is_file():
         return jsonify({"error": "file not found"}), 404
 
-    response = upload_wav_to_ei(path, filename, "unknown")
+    response = upload_wav_to_ei(path, filename, label)
     if response.status_code >= 300:
         return jsonify({"error": f"Edge Impulse upload failed: {response.status_code} {response.text}"}), 502
 
     try:
         requests.delete(f"{AUDIO_BUFFER_API}/captures/{filename}", timeout=10)
     except requests.RequestException as e:
-        return jsonify({"uploaded": filename, "deleted": False, "delete_error": str(e)})
+        return jsonify({"uploaded": filename, "label": label, "deleted": False, "delete_error": str(e)})
 
-    return jsonify({"uploaded": filename, "deleted": True})
+    return jsonify({"uploaded": filename, "label": label, "deleted": True})
+
+
+@app.route("/api/captures/<path:filename>/confirm", methods=["POST"])
+def api_captures_confirm(filename):
+    label = parse_capture_filename(filename)
+    return _upload_capture_and_remove(filename, label)
+
+
+@app.route("/api/captures/<path:filename>/relabel", methods=["POST"])
+def api_captures_relabel(filename):
+    body = request.get_json(silent=True) or {}
+    label = body.get("label", "")
+    return _upload_capture_and_remove(filename, label)
 
 
 @app.route("/api/train/samples/lookup")

@@ -750,9 +750,11 @@ async function loadCaptures() {
       return;
     }
     capturesStatus.textContent = `${captures.length} capture(s), most recent first.`;
+    const labels = window.LABELS || [];
     capturesList.innerHTML = captures.map(c => {
       const { label, score } = parseCaptureFilename(c.filename);
       const pct = Number.isFinite(score) ? `${(score * 100).toFixed(0)}%` : "?";
+      const options = labels.map(l => `<option value="${l}">${l}</option>`).join("");
       return `
         <li>
           <span class="capture-row">
@@ -760,8 +762,12 @@ async function loadCaptures() {
             <span>${label} (${pct}) &middot; ${timeAgo(c.mtime)}</span>
           </span>
           <span class="capture-actions">
-            <button class="correct" data-filename="${c.filename}">&check; Correct</button>
-            <button class="false-trigger" data-filename="${c.filename}">&cross; False trigger</button>
+            <button class="correct" data-filename="${c.filename}" title="Detected label is correct &mdash; upload as ${label}">&check; Correct</button>
+            <select class="relabel-select" data-filename="${c.filename}">
+              <option value="" selected disabled>Relabel as&hellip;</option>
+              ${options}
+            </select>
+            <button class="discard" data-filename="${c.filename}" title="Not usable for training &mdash; delete without uploading">&cross; Discard</button>
           </span>
         </li>
       `;
@@ -771,7 +777,26 @@ async function loadCaptures() {
   }
 }
 
-capturesList.addEventListener("click", async (e) => {
+function disableCaptureRow(el, disabled) {
+  const row = el.closest("li");
+  if (!row) return;
+  row.querySelectorAll("button, select").forEach(x => { x.disabled = disabled; });
+}
+
+async function submitCaptureAction(el, filename, url, options) {
+  disableCaptureRow(el, true);
+  try {
+    const res = await fetch(url, options);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    await loadCaptures();
+  } catch (e) {
+    capturesStatus.textContent = `Error: ${e.message}`;
+    disableCaptureRow(el, false);
+  }
+}
+
+capturesList.addEventListener("click", (e) => {
   const btn = e.target.closest("button");
   if (!btn) return;
   const filename = btn.dataset.filename;
@@ -783,34 +808,26 @@ capturesList.addEventListener("click", async (e) => {
   }
 
   if (btn.classList.contains("correct")) {
-    btn.disabled = true;
-    try {
-      const res = await fetch(`/api/captures/${encodeURIComponent(filename)}`, { method: "DELETE" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
-      await loadCaptures();
-    } catch (e) {
-      capturesStatus.textContent = `Error: ${e.message}`;
-      btn.disabled = false;
-    }
+    submitCaptureAction(btn, filename, `/api/captures/${encodeURIComponent(filename)}/confirm`, { method: "POST" });
     return;
   }
 
-  if (btn.classList.contains("false-trigger")) {
-    btn.disabled = true;
-    const otherBtn = btn.parentElement.querySelector(".correct");
-    if (otherBtn) otherBtn.disabled = true;
-    try {
-      const res = await fetch(`/api/captures/${encodeURIComponent(filename)}/false-trigger`, { method: "POST" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
-      await loadCaptures();
-    } catch (e) {
-      capturesStatus.textContent = `Error: ${e.message}`;
-      btn.disabled = false;
-      if (otherBtn) otherBtn.disabled = false;
-    }
+  if (btn.classList.contains("discard")) {
+    submitCaptureAction(btn, filename, `/api/captures/${encodeURIComponent(filename)}`, { method: "DELETE" });
   }
+});
+
+capturesList.addEventListener("change", (e) => {
+  const select = e.target.closest(".relabel-select");
+  if (!select) return;
+  const filename = select.dataset.filename;
+  const label = select.value;
+  if (!filename || !label) return;
+  submitCaptureAction(select, filename, `/api/captures/${encodeURIComponent(filename)}/relabel`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ label }),
+  });
 });
 
 // --- Audio pipeline mode (Classic / Buffer) ---

@@ -297,13 +297,14 @@ button.primary {
   flex-shrink: 0;
 }
 
-.capture-actions button {
+.capture-actions button,
+.capture-actions select {
   padding: 3px 9px;
   font-size: 12px;
 }
 
 button.correct { border-color: var(--status-good); color: var(--status-good); }
-button.false-trigger { border-color: var(--status-critical); color: var(--status-critical); }
+button.discard { border-color: var(--status-critical); color: var(--status-critical); }
 
 .empty {
   color: var(--muted);
