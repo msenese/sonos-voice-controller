@@ -124,6 +124,15 @@ h1 {
   accent-color: var(--text-secondary);
 }
 
+.toggle-btn {
+  font-weight: 500;
+}
+
+.toggle-btn.active {
+  border-color: var(--status-good);
+  color: var(--status-good);
+}
+
 .info-icon {
   position: relative;
   display: inline-flex;

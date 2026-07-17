@@ -201,6 +201,13 @@ It shows:
 - **Sonos transport controls** in the header: play/pause, mute, and a
   volume slider that call Home Assistant's `media_player` services
   directly, independent of voice control.
+- **Auto-Resume Playback** toggle in the header: while On, a background
+  loop polls Home Assistant every ~1s and resumes playback the moment it
+  sees the Sonos entity paused — including false-trigger pauses. Meant for
+  actively gathering Recordings to Review without manually hitting play
+  after every false trigger. Off by default; turn it off again once
+  you're done testing rather than leaving it running unattended, since it
+  will resume playback after *any* pause, including ones you meant.
 
 ## Known assumptions to double check
 

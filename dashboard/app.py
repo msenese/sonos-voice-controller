@@ -4,6 +4,7 @@ import json
 import re
 import subprocess
 import sys
+import threading
 import time
 import zipfile
 from datetime import date
@@ -980,5 +981,42 @@ def api_sonos_volume():
     return jsonify({"ok": True})
 
 
+# "Auto-Resume Playback": for gathering trigger-capture samples without having
+# to manually hit play after every false pause trigger. Off by default -- this
+# is a manual testing aid, not something that should run unattended.
+_auto_resume_enabled = False
+_auto_resume_lock = threading.Lock()
+
+
+def _auto_resume_loop():
+    while True:
+        time.sleep(1)
+        with _auto_resume_lock:
+            enabled = _auto_resume_enabled
+        if not enabled:
+            continue
+        try:
+            r = requests.get(f"{cfg.HA_URL}/api/states/{cfg.SONOS_ENTITY}", headers=ha_headers(), timeout=5)
+            if r.status_code < 300 and r.json().get("state") == "paused":
+                ha_call_service("media_player", "media_play", {"entity_id": cfg.SONOS_ENTITY})
+        except requests.RequestException:
+            pass
+
+
+@app.route("/api/sonos/auto-resume")
+def api_sonos_auto_resume_get():
+    return jsonify({"enabled": _auto_resume_enabled})
+
+
+@app.route("/api/sonos/auto-resume", methods=["POST"])
+def api_sonos_auto_resume_post():
+    global _auto_resume_enabled
+    body = request.get_json(silent=True) or {}
+    with _auto_resume_lock:
+        _auto_resume_enabled = bool(body.get("enabled"))
+    return jsonify({"enabled": _auto_resume_enabled})
+
+
 if __name__ == "__main__":
+    threading.Thread(target=_auto_resume_loop, daemon=True).start()
     app.run(host="0.0.0.0", port=8080)

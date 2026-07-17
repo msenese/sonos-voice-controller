@@ -961,12 +961,49 @@ volumeSlider.addEventListener("change", async () => {
   }
 });
 
+// --- Auto-Resume Playback ---
+
+const autoResumeBtn = document.getElementById("auto-resume-toggle");
+let autoResumeEnabled = false;
+
+function setAutoResumeButton(enabled) {
+  autoResumeEnabled = enabled;
+  autoResumeBtn.textContent = `Auto-Resume Playback: ${enabled ? "On" : "Off"}`;
+  autoResumeBtn.classList.toggle("active", enabled);
+}
+
+async function loadAutoResume() {
+  try {
+    const res = await fetch("/api/sonos/auto-resume");
+    const data = await res.json();
+    setAutoResumeButton(!!data.enabled);
+  } catch (e) {
+    // Leave the last-known state showing; badges elsewhere surface connectivity issues.
+  }
+}
+
+autoResumeBtn.addEventListener("click", async () => {
+  autoResumeBtn.disabled = true;
+  try {
+    const res = await fetch("/api/sonos/auto-resume", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: !autoResumeEnabled }),
+    });
+    const data = await res.json();
+    setAutoResumeButton(!!data.enabled);
+  } finally {
+    autoResumeBtn.disabled = false;
+  }
+});
+
 pollState();
 pollSystem();
 pollSonos();
 loadSampleCounts();
 loadCaptures();
 loadAudioMode();
+loadAutoResume();
 setInterval(pollState, 1000);
 setInterval(pollSystem, 5000);
 setInterval(pollSonos, 5000);
