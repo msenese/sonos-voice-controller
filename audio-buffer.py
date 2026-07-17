@@ -96,7 +96,10 @@ def input_reader_thread():
     docstring for why this isn't sounddevice like the output side is), and
     restarts arecord if it ever dies rather than leaving input silently dead."""
     global _input_restart_count
+    backoff = 1
+    max_backoff = 30
     while True:
+        started_at = time.time()
         proc = subprocess.Popen(
             [
                 "arecord", "-D", INPUT_DEVICE_ARECORD,
@@ -119,8 +122,12 @@ def input_reader_thread():
             proc.kill()
             proc.wait()
         _input_restart_count += 1
-        print(f"[AUDIO] Restarting arecord input (restart #{_input_restart_count})")
-        time.sleep(1)
+        # A run that lasted a while was a real (if rare) hiccup, not a persistent
+        # failure -- reset the backoff so we don't punish future one-off blips.
+        ran_for = time.time() - started_at
+        backoff = 1 if ran_for > 5 else min(backoff * 2, max_backoff)
+        print(f"[AUDIO] Restarting arecord input in {backoff}s (restart #{_input_restart_count}, ran for {ran_for:.1f}s)")
+        time.sleep(backoff)
 
 
 def output_callback(outdata, frames, time_info, status):
