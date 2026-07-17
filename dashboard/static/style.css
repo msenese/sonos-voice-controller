@@ -380,6 +380,15 @@ button.primary {
 button.correct { border-color: var(--status-good); color: var(--status-good); }
 button.discard { border-color: var(--status-critical); color: var(--status-critical); }
 
+button.danger {
+  border-color: var(--status-critical);
+  background: var(--status-critical);
+  color: #fff;
+  font-weight: 600;
+}
+
+button.danger:hover { border-color: var(--status-critical); opacity: 0.9; }
+
 .empty {
   color: var(--muted);
   font-size: 13px;

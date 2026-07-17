@@ -64,7 +64,17 @@ function timeAgo(ts) {
   const seconds = Math.max(0, Math.floor(Date.now() / 1000 - ts));
   if (seconds < 60) return `${seconds}s ago`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-  return `${Math.floor(seconds / 3600)}h ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+  return `${Math.floor(seconds / 86400)}d ago`;
+}
+
+function formatModelMeta(meta) {
+  if (!meta || !meta.activated_at) return null;
+  const date = new Date(meta.activated_at * 1000).toLocaleDateString(undefined, {
+    year: "numeric", month: "short", day: "numeric",
+  });
+  const acc = typeof meta.accuracy === "number" ? `, ${meta.accuracy.toFixed(1)}% accuracy` : "";
+  return `${date} (${timeAgo(meta.activated_at)}${acc})`;
 }
 
 async function pollState() {
@@ -715,6 +725,58 @@ activateBtn.addEventListener("click", async () => {
   } catch (e) {
     modelStatus.textContent = `Error: ${e.message}`;
     activateBtn.disabled = false;
+  } finally {
+    loadModelStatus();
+  }
+});
+
+// --- Model status / rollback ---
+
+const modelCurrentStatus = document.getElementById("model-current-status");
+const rollbackRow = document.getElementById("model-rollback-row");
+const rollbackBtn = document.getElementById("model-rollback");
+const rollbackStatus = document.getElementById("model-rollback-status");
+
+async function loadModelStatus() {
+  try {
+    const res = await fetch("/api/model/status");
+    const data = await res.json();
+
+    const liveDesc = formatModelMeta(data.live);
+    modelCurrentStatus.textContent = liveDesc
+      ? `Currently running: activated ${liveDesc}`
+      : "Currently running: no activation metadata recorded for this model yet.";
+
+    rollbackRow.style.display = data.previous_exists ? "" : "none";
+    if (data.previous_exists) {
+      const prevDesc = formatModelMeta(data.previous);
+      rollbackStatus.textContent = prevDesc
+        ? `Roll back to the model activated ${prevDesc}.`
+        : "Roll back to the previous model (no activation metadata recorded for it).";
+    }
+  } catch (e) {
+    // Leave things in their last-known state; other status lines already
+    // surface connectivity issues.
+  }
+}
+
+rollbackBtn.addEventListener("click", async () => {
+  const ok = confirm(
+    "This will replace the live model with the previous one and restart the keyword-spotting service. " +
+    "Voice control will be briefly unavailable. Continue?"
+  );
+  if (!ok) return;
+  rollbackBtn.disabled = true;
+  rollbackStatus.textContent = "Rolling back to the previous model...";
+  try {
+    const res = await fetch("/api/model/rollback", { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    await loadModelStatus();
+  } catch (e) {
+    rollbackStatus.textContent = `Error: ${e.message}`;
+  } finally {
+    rollbackBtn.disabled = false;
   }
 });
 
@@ -836,13 +898,13 @@ const audioModeStatus = document.getElementById("audio-mode-status");
 const audioModeClassicBtn = document.getElementById("audio-mode-classic");
 const audioModeBufferBtn = document.getElementById("audio-mode-buffer");
 const capturesCard = document.getElementById("captures-card");
-const autoResumeRow = document.getElementById("auto-resume-row");
+const autoResumeToggleBtn = document.getElementById("auto-resume-toggle");
 
 function setAudioModeButtons(mode) {
   audioModeClassicBtn.classList.toggle("primary", mode === "classic");
   audioModeBufferBtn.classList.toggle("primary", mode === "buffer");
   capturesCard.style.display = mode === "buffer" ? "" : "none";
-  autoResumeRow.style.display = mode === "buffer" ? "" : "none";
+  autoResumeToggleBtn.style.display = mode === "buffer" ? "" : "none";
 }
 
 async function loadAudioMode() {
@@ -1010,6 +1072,7 @@ loadSampleCounts();
 loadCaptures();
 loadAudioMode();
 loadAutoResume();
+loadModelStatus();
 setInterval(pollState, 1000);
 setInterval(pollSystem, 5000);
 setInterval(pollSonos, 5000);

@@ -13,3 +13,5 @@ sample_counts_baseline.json
 /sonos-model.eim
 /sonos-model-pending.eim
 /sonos-model-previous.eim
+/sonos-model.meta.json
+/sonos-model-previous.meta.json

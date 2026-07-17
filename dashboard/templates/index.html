@@ -51,29 +51,6 @@
     </ul>
   </div>
 
-  <div class="card">
-    <h2>Audio Capture Mode
-      <span class="info-icon" tabindex="0" data-tooltip="Audio Capture OFF: Direct microphone processing, fastest detection results.&#10;&#10;Audio Capture ON: Recordings of each detection are saved below so you can review and label them into the dataset, which improves future models. Slower for detection processing.">?</span>
-    </h2>
-    <div class="train-row">
-      <button id="audio-mode-classic" class="primary">Off</button>
-      <button id="audio-mode-buffer">On</button>
-    </div>
-    <div class="status-line" id="audio-mode-status">Loading current mode...</div>
-    <div id="auto-resume-row" style="display:none; margin-top:10px;">
-      <button id="auto-resume-toggle" class="badge toggle-btn" title="Automatically resumes playback moments after any pause, including false-trigger pauses, so you can gather trigger-capture samples without manually pressing play. Meant for active testing, not for leaving on unattended.">Auto-Resume Playback: Off</button>
-    </div>
-  </div>
-
-  <div class="card" id="captures-card" style="display:none;">
-    <h2>Recordings to Review</h2>
-    <div class="status-line" id="captures-status">Loading...</div>
-    <ul class="history-list" id="captures-list">
-      <li class="empty">No captures yet</li>
-    </ul>
-    <audio id="capture-audio" style="display:none;"></audio>
-  </div>
-
   <div class="grid-2">
     <div class="card">
       <h2>Thresholds</h2>
@@ -105,8 +82,29 @@
     </div>
   </div>
 
+  <div class="card">
+    <h2>Audio Capture Mode
+      <span class="info-icon" tabindex="0" data-tooltip="Audio Capture OFF: Direct microphone processing, fastest detection results.&#10;&#10;Audio Capture ON: Recordings of each detection are saved below so you can review and label them into the dataset, which improves future models. Slower for detection processing.">?</span>
+    </h2>
+    <div class="train-row">
+      <button id="audio-mode-classic" class="primary">Off</button>
+      <button id="audio-mode-buffer">On</button>
+      <button id="auto-resume-toggle" class="badge toggle-btn" style="display:none; margin-left:auto;" title="Automatically resumes playback moments after any pause, including false-trigger pauses, so you can gather trigger-capture samples without manually pressing play. Meant for active testing, not for leaving on unattended.">Auto-Resume Playback: Off</button>
+    </div>
+    <div class="status-line" id="audio-mode-status">Loading current mode...</div>
+  </div>
+
+  <div class="card" id="captures-card" style="display:none;">
+    <h2>Recordings to Review</h2>
+    <div class="status-line" id="captures-status">Loading...</div>
+    <ul class="history-list" id="captures-list">
+      <li class="empty">No captures yet</li>
+    </ul>
+    <audio id="capture-audio" style="display:none;"></audio>
+  </div>
+
   <div class="workflow-group">
-    <div class="workflow-group-label">Model Training Workflow</div>
+    <div class="workflow-group-label">Model Training</div>
 
     <div class="card">
       <h2>Training Mode</h2>
@@ -140,6 +138,7 @@
 
     <div class="card">
       <h2>Retrain &amp; Deploy Model</h2>
+      <div class="status-line" id="model-current-status" style="margin-bottom:12px;">Loading current model...</div>
       <div id="sample-counts">
         {% for label in labels %}
         <div class="meter-row" style="grid-template-columns: 110px 1fr;">
@@ -170,6 +169,11 @@
         <div style="overflow-x:auto;">
           <table id="confusion-matrix" style="border-collapse: collapse; font-size: 12px;"></table>
         </div>
+      </div>
+
+      <div id="model-rollback-row" style="display:none; margin-top:16px; padding-top:16px; border-top:1px solid var(--gridline);">
+        <button id="model-rollback" class="danger">&#9888;&#65039; Rollback to Previous Model</button>
+        <div class="status-line" id="model-rollback-status" style="margin-top:8px;">Swaps back to the model that was active before the current one, and restarts detection.</div>
       </div>
     </div>
   </div>

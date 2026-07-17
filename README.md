@@ -187,7 +187,17 @@ It shows:
   it (backs up the outgoing model, swaps it in, restarts `ei-runner`). A
   successful activation auto-commits and pushes the new model to GitHub via
   a repo-scoped deploy key from a separate clone at `~/git-archive/` on the
-  Pi.
+  Pi. The card always shows which model is currently live (activation date
+  and accuracy, from a `sonos-model.meta.json` sidecar file written on every
+  activate/rollback) so this doesn't get lost track of over time.
+- **Rollback to Previous Model** (only shown when a previous model exists):
+  swaps `sonos-model.eim` and `sonos-model-previous.eim` and restarts
+  `ei-runner`. This is a true swap, not an overwrite -- the outgoing live
+  model becomes the new "previous", so clicking it twice undoes itself.
+  Uses atomic renames rather than writing into the live file directly,
+  since `ei-runner` may have it open/executing and an in-place write fails
+  with `ETXTBSY` ("Text file busy") -- the same reason `activate` uses
+  `PENDING_MODEL_PATH.replace(LIVE_MODEL_PATH)` instead of overwriting.
 - **Audio Capture Mode** (Off/On): switches whether `ei-runner` reads the
   real mic directly or via the `audio-buffer.py` loopback forwarder — see
   "Audio Capture Mode" above for the full explanation and tradeoffs.

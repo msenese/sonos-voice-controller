@@ -25,6 +25,8 @@ AUDIO_DEVICE = "plughw:1,0"
 LIVE_MODEL_PATH = PROJECT_ROOT / "sonos-model.eim"
 MODEL_BACKUP_PATH = PROJECT_ROOT / "sonos-model-previous.eim"
 PENDING_MODEL_PATH = PROJECT_ROOT / "sonos-model-pending.eim"
+LIVE_MODEL_META_PATH = PROJECT_ROOT / "sonos-model.meta.json"
+MODEL_BACKUP_META_PATH = PROJECT_ROOT / "sonos-model-previous.meta.json"
 SAMPLE_BASELINE_PATH = PROJECT_ROOT / "sample_counts_baseline.json"
 GIT_ARCHIVE_REPO = Path.home() / "git-archive" / "sonos-voice-controller"
 CAPTURE_DIR = Path("/home/msenese/trigger-captures")
@@ -48,6 +50,17 @@ CONFIG_FIELDS = {
 }
 
 app = Flask(__name__)
+
+
+def read_model_meta(path):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def write_model_meta(path, activated_at, accuracy, source):
+    path.write_text(json.dumps({"activated_at": activated_at, "accuracy": accuracy, "source": source}))
 
 
 def label_to_slug(label):
@@ -717,6 +730,65 @@ def api_model_pending():
     return jsonify({"exists": True, "size": st.st_size, "mtime": st.st_mtime})
 
 
+@app.route("/api/model/rollback-status")
+def api_model_rollback_status():
+    return jsonify({"available": MODEL_BACKUP_PATH.exists()})
+
+
+@app.route("/api/model/status")
+def api_model_status():
+    return jsonify({
+        "live": read_model_meta(LIVE_MODEL_META_PATH) if LIVE_MODEL_PATH.exists() else None,
+        "previous": read_model_meta(MODEL_BACKUP_META_PATH) if MODEL_BACKUP_PATH.exists() else None,
+        "previous_exists": MODEL_BACKUP_PATH.exists(),
+    })
+
+
+@app.route("/api/model/rollback", methods=["POST"])
+def api_model_rollback():
+    if not MODEL_BACKUP_PATH.exists():
+        return jsonify({"error": "no previous model to roll back to"}), 400
+
+    # Swap via atomic renames rather than writing into sonos-model.eim directly --
+    # ei-runner may still have it open/mapped for execution, and writing into an
+    # in-use executable fails with ETXTBSY ("Text file busy"). Renames don't touch
+    # the open inode's contents, so they're safe regardless -- same reason
+    # api_model_activate() uses PENDING_MODEL_PATH.replace(LIVE_MODEL_PATH).
+    tmp_swap_path = PROJECT_ROOT / "sonos-model.rollback-tmp.eim"
+    live_existed = LIVE_MODEL_PATH.exists()
+    if live_existed:
+        LIVE_MODEL_PATH.replace(tmp_swap_path)
+    MODEL_BACKUP_PATH.replace(LIVE_MODEL_PATH)
+    if live_existed:
+        tmp_swap_path.replace(MODEL_BACKUP_PATH)
+
+    current_meta = LIVE_MODEL_META_PATH.read_text() if LIVE_MODEL_META_PATH.exists() else None
+    backup_meta = MODEL_BACKUP_META_PATH.read_text() if MODEL_BACKUP_META_PATH.exists() else None
+    if backup_meta is not None:
+        LIVE_MODEL_META_PATH.write_text(backup_meta)
+    else:
+        LIVE_MODEL_META_PATH.unlink(missing_ok=True)
+    if current_meta is not None:
+        MODEL_BACKUP_META_PATH.write_text(current_meta)
+    else:
+        MODEL_BACKUP_META_PATH.unlink(missing_ok=True)
+
+    try:
+        result = subprocess.run(
+            ["sudo", "systemctl", "restart", "ei-runner.service"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except OSError as e:
+        return jsonify({"error": f"model file rolled back, but restart failed: {e}"}), 500
+    if result.returncode != 0:
+        return jsonify({"error": f"model file rolled back, but restart failed: {result.stderr.strip()}"}), 500
+
+    connected = _wait_for_ei_connection(timeout=40)
+    if not connected:
+        return jsonify({"error": "model rolled back and ei-runner restarted, but it never reconnected"}), 500
+    return jsonify({"rolled_back": True, "connected": True})
+
+
 def archive_model_to_git(accuracy=None):
     if not GIT_ARCHIVE_REPO.exists():
         return {"archived": False, "error": "git archive clone not found on the Pi"}
@@ -762,9 +834,20 @@ def api_model_activate():
     if not PENDING_MODEL_PATH.exists():
         return jsonify({"error": "no pending model to activate"}), 400
 
+    body = request.get_json(silent=True) or {}
+    raw_accuracy = body.get("accuracy")
+    accuracy = raw_accuracy if isinstance(raw_accuracy, (int, float)) else None
+
     if LIVE_MODEL_PATH.exists():
         MODEL_BACKUP_PATH.write_bytes(LIVE_MODEL_PATH.read_bytes())
+        # The outgoing live model's metadata becomes the new backup's metadata,
+        # mirroring the .eim swap -- so rollback status always reflects reality.
+        if LIVE_MODEL_META_PATH.exists():
+            MODEL_BACKUP_META_PATH.write_text(LIVE_MODEL_META_PATH.read_text())
+        else:
+            MODEL_BACKUP_META_PATH.unlink(missing_ok=True)
     PENDING_MODEL_PATH.replace(LIVE_MODEL_PATH)
+    write_model_meta(LIVE_MODEL_META_PATH, time.time(), accuracy, "retrain")
 
     try:
         result = subprocess.run(
@@ -776,9 +859,7 @@ def api_model_activate():
     if result.returncode != 0:
         return jsonify({"error": f"model file swapped, but restart failed: {result.stderr.strip()}"}), 500
 
-    body = request.get_json(silent=True) or {}
-    accuracy = body.get("accuracy")
-    archive_result = archive_model_to_git(accuracy if isinstance(accuracy, (int, float)) else None)
+    archive_result = archive_model_to_git(accuracy)
 
     return jsonify({"activated": True, "archive": archive_result})
 
