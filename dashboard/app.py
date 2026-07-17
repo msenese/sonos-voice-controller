@@ -844,6 +844,12 @@ def _switch_audio_mode_raw(mode):
     else:
         _run_sudo("systemctl", "stop", "audio-buffer.service")
         _run_sudo("systemctl", "disable", "audio-buffer.service")
+        # Auto-Resume Playback's toggle only exists in the UI while Capture Mode
+        # is On -- don't leave it silently enabled with no visible way to turn
+        # it off once we're switching Off.
+        global _auto_resume_enabled
+        with _auto_resume_lock:
+            _auto_resume_enabled = False
 
     EI_RUNNER_PENDING_PATH.write_text(_build_ei_runner_unit(microphone))
     _run_sudo("cp", str(EI_RUNNER_PENDING_PATH), str(EI_RUNNER_SERVICE_PATH))

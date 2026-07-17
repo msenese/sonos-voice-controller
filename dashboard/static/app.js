@@ -836,11 +836,13 @@ const audioModeStatus = document.getElementById("audio-mode-status");
 const audioModeClassicBtn = document.getElementById("audio-mode-classic");
 const audioModeBufferBtn = document.getElementById("audio-mode-buffer");
 const capturesCard = document.getElementById("captures-card");
+const autoResumeRow = document.getElementById("auto-resume-row");
 
 function setAudioModeButtons(mode) {
   audioModeClassicBtn.classList.toggle("primary", mode === "classic");
   audioModeBufferBtn.classList.toggle("primary", mode === "buffer");
   capturesCard.style.display = mode === "buffer" ? "" : "none";
+  autoResumeRow.style.display = mode === "buffer" ? "" : "none";
 }
 
 async function loadAudioMode() {
@@ -888,6 +890,10 @@ async function switchAudioMode(mode) {
     audioModeClassicBtn.disabled = false;
     audioModeBufferBtn.disabled = false;
     await loadAudioMode();
+    // The server force-disables Auto-Resume Playback whenever it switches to Off
+    // (including an automatic rollback); refresh the button so it doesn't show a
+    // stale "On" if that just happened.
+    await loadAutoResume();
   }
 }
 
