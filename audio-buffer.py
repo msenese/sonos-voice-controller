@@ -1,3 +1,5 @@
+import queue
+import subprocess
 import threading
 import time
 import wave
@@ -13,19 +15,36 @@ CHANNELS = 1
 BUFFER_SECONDS = 3
 BUFFER_SAMPLES = SAMPLE_RATE * BUFFER_SECONDS
 BLOCK_SIZE = 1600  # 100ms per callback
+BLOCK_BYTES = BLOCK_SIZE * 2  # int16
 
-# NOT CURRENTLY SAFE TO ENABLE. edge-impulse-linux-runner captures audio via
-# sox grabbing its configured hardware device directly and exclusively --
-# it never goes through ALSA's dsnoop/plug sharing layer, regardless of
-# device name. ei-runner.service is pinned to --microphone hw:1,0 (see
-# services/ei-runner.service); this service using "capture" (the shared
-# plug+dsnoop PCM defined in /etc/asound.conf) will still collide with it
-# for the same underlying hw:1,0 slave and take voice control down, exactly
-# as it did in production. A validated fix exists -- ei-runner reads from an
-# snd-aloop loopback device that this service forwards real audio into --
-# but the duplex forwarding logic isn't implemented yet (see tasks 34/35).
-# Do not enable audio-buffer.service until that's built and soak-tested.
-DEVICE = "capture"
+# edge-impulse-linux-runner captures audio via sox grabbing its configured
+# hardware device directly and exclusively -- it never goes through ALSA's
+# dsnoop/plug sharing layer, regardless of device name. So this service
+# owns the real mic exclusively and forwards what it hears into an
+# snd-aloop loopback device in real time; ei-runner is pointed at the
+# loopback's capture side instead of the real hardware (see
+# services/ei-runner.service and the Classic/Buffer toggle in the
+# dashboard). Validated pairing on this Pi: playing into hw:2,1 comes out
+# for capture on hw:2,0 (not the reverse -- ei-runner's own microphone
+# enumeration only lists hw:2,0, not hw:2,1).
+#
+# Input uses an `arecord` subprocess, not sounddevice/PortAudio directly:
+# PortAudio's ALSA enumeration reports the wm8960 hardware as "0 in, 2 out"
+# on this Pi regardless of device string (plughw:1,0 included), even though
+# arecord opens and reads it fine -- a PortAudio-specific enumeration
+# limitation with this card, not an ALSA one. The loopback devices *do*
+# enumerate correctly under PortAudio, so the output/forwarding side uses
+# sounddevice normally.
+INPUT_DEVICE_ARECORD = "plughw:1,0"
+OUTPUT_DEVICE_SUBSTRING = "hw:2,1"
+
+
+def find_output_device_index(substring):
+    for i, d in enumerate(sd.query_devices()):
+        if substring in d["name"] and d["max_output_channels"] > 0:
+            return i
+    raise RuntimeError(f"no output device found matching {substring!r}")
+
 
 CAPTURE_DIR = Path("/home/msenese/trigger-captures")
 MAX_CAPTURES = 50
@@ -34,17 +53,26 @@ _buffer = np.zeros(BUFFER_SAMPLES, dtype=np.int16)
 _write_pos = 0
 _buffer_lock = threading.Lock()
 
+# The real hardware clock (input) and the loopback's software clock (output)
+# aren't synchronized, so a bounded queue with drop-oldest-on-full and
+# silence-on-empty is the right tradeoff -- occasional single-block glitches
+# under clock drift, never an unbounded backlog or a blocked audio thread.
+_forward_queue = queue.Queue(maxsize=30)  # ~3s of cushion at 100ms blocks
+
+_last_input_time = None
+_last_output_time = None
+_input_restart_count = 0
+_output_status_count = 0
+
 app = Flask(__name__)
 
 
-def audio_callback(indata, frames, time_info, status):
-    global _write_pos
-    if status:
-        print(f"[AUDIO] Status: {status}")
-    mono = indata[:, 0] if indata.ndim > 1 else indata
-    n = len(mono)
+def _handle_input_block(mono):
+    global _write_pos, _last_input_time
+    _last_input_time = time.time()
+
     with _buffer_lock:
-        end_pos = _write_pos + n
+        end_pos = _write_pos + len(mono)
         if end_pos <= BUFFER_SAMPLES:
             _buffer[_write_pos:end_pos] = mono
         else:
@@ -52,6 +80,64 @@ def audio_callback(indata, frames, time_info, status):
             _buffer[_write_pos:] = mono[:first_part]
             _buffer[:end_pos - BUFFER_SAMPLES] = mono[first_part:]
         _write_pos = end_pos % BUFFER_SAMPLES
+
+    try:
+        _forward_queue.put_nowait(mono.copy())
+    except queue.Full:
+        try:
+            _forward_queue.get_nowait()
+            _forward_queue.put_nowait(mono.copy())
+        except queue.Empty:
+            pass
+
+
+def input_reader_thread():
+    """Reads raw PCM from a continuous arecord subprocess (see the module
+    docstring for why this isn't sounddevice like the output side is), and
+    restarts arecord if it ever dies rather than leaving input silently dead."""
+    global _input_restart_count
+    while True:
+        proc = subprocess.Popen(
+            [
+                "arecord", "-D", INPUT_DEVICE_ARECORD,
+                "-f", "S16_LE", "-r", str(SAMPLE_RATE), "-c", str(CHANNELS),
+                "-t", "raw", "-q",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            while True:
+                raw = proc.stdout.read(BLOCK_BYTES)
+                if len(raw) < BLOCK_BYTES:
+                    stderr = proc.stderr.read().decode(errors="replace")
+                    print(f"[AUDIO] arecord input ended unexpectedly: {stderr[:300]}")
+                    break
+                mono = np.frombuffer(raw, dtype=np.int16)
+                _handle_input_block(mono)
+        finally:
+            proc.kill()
+            proc.wait()
+        _input_restart_count += 1
+        print(f"[AUDIO] Restarting arecord input (restart #{_input_restart_count})")
+        time.sleep(1)
+
+
+def output_callback(outdata, frames, time_info, status):
+    global _last_output_time, _output_status_count
+    if status:
+        _output_status_count += 1
+        print(f"[AUDIO] Output status: {status}")
+    _last_output_time = time.time()
+    try:
+        data = _forward_queue.get_nowait()
+    except queue.Empty:
+        outdata[:, 0] = 0
+        return
+    n = min(len(data), frames)
+    outdata[:n, 0] = data[:n]
+    if n < frames:
+        outdata[n:, 0] = 0
 
 
 def get_buffer_snapshot():
@@ -67,6 +153,18 @@ def enforce_max_captures():
     files = sorted(CAPTURE_DIR.glob("*.wav"), key=lambda p: p.stat().st_mtime)
     while len(files) > MAX_CAPTURES:
         files.pop(0).unlink(missing_ok=True)
+
+
+@app.route("/health")
+def health():
+    now = time.time()
+    return jsonify({
+        "input_alive": _last_input_time is not None and (now - _last_input_time) < 2,
+        "output_alive": _last_output_time is not None and (now - _last_output_time) < 2,
+        "forward_queue_size": _forward_queue.qsize(),
+        "input_restart_count": _input_restart_count,
+        "output_status_events": _output_status_count,
+    })
 
 
 @app.route("/capture", methods=["POST"])
@@ -118,13 +216,19 @@ def delete_capture(filename):
 
 
 if __name__ == "__main__":
-    stream = sd.InputStream(
-        device=DEVICE,
+    output_device_index = find_output_device_index(OUTPUT_DEVICE_SUBSTRING)
+    print(f"[AUDIO] Forwarding output device: {sd.query_devices(output_device_index)['name']}")
+
+    output_stream = sd.OutputStream(
+        device=output_device_index,
         channels=CHANNELS,
         samplerate=SAMPLE_RATE,
         dtype="int16",
         blocksize=BLOCK_SIZE,
-        callback=audio_callback,
+        callback=output_callback,
     )
-    stream.start()
+    output_stream.start()
+
+    threading.Thread(target=input_reader_thread, daemon=True).start()
+
     app.run(host="0.0.0.0", port=8081)

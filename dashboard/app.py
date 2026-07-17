@@ -28,6 +28,11 @@ SAMPLE_BASELINE_PATH = PROJECT_ROOT / "sample_counts_baseline.json"
 GIT_ARCHIVE_REPO = Path.home() / "git-archive" / "sonos-voice-controller"
 CAPTURE_DIR = Path("/home/msenese/trigger-captures")
 AUDIO_BUFFER_API = "http://localhost:8081"
+
+EI_RUNNER_SERVICE_PATH = Path("/etc/systemd/system/ei-runner.service")
+EI_RUNNER_PENDING_PATH = PROJECT_ROOT / "ei-runner.service.pending"
+CLASSIC_MICROPHONE = "hw:1,0"
+BUFFER_MICROPHONE = "hw:2,0"
 EI_API_BASE = "https://studio.edgeimpulse.com/v1/api"
 EI_BUILD_TARGET = "runner-linux-aarch64"
 EI_BUILD_ENGINE = "tflite"
@@ -754,6 +759,125 @@ def api_model_activate():
     archive_result = archive_model_to_git(accuracy if isinstance(accuracy, (int, float)) else None)
 
     return jsonify({"activated": True, "archive": archive_result})
+
+
+def _build_ei_runner_unit(microphone):
+    return f"""[Unit]
+Description=Edge Impulse Linux Runner
+After=network.target sound.target
+
+[Service]
+User=msenese
+ExecStart=/usr/bin/edge-impulse-linux-runner --microphone {microphone} --model-file /home/msenese/sonos-model.eim --disable-camera
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+def _run_sudo(*args, timeout=15):
+    result = subprocess.run(["sudo", *args], capture_output=True, text=True, timeout=timeout)
+    if result.returncode != 0:
+        raise RuntimeError(f"{' '.join(args)} failed: {result.stderr.strip()}")
+
+
+def _wait_for_audio_buffer_input(timeout=15, interval=1):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            r = requests.get(f"{AUDIO_BUFFER_API}/health", timeout=3)
+            if r.json().get("input_alive"):
+                return True
+        except requests.RequestException:
+            pass
+        time.sleep(interval)
+    return False
+
+
+def _wait_for_ei_connection(timeout=40, interval=2):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            state = json.loads(STATE_FILE.read_text())
+            if state.get("connection_status") == "connected":
+                return True
+        except (OSError, ValueError):
+            pass
+        time.sleep(interval)
+    return False
+
+
+def _switch_audio_mode_raw(mode):
+    microphone = BUFFER_MICROPHONE if mode == "buffer" else CLASSIC_MICROPHONE
+
+    _run_sudo("systemctl", "stop", "ei-runner.service")
+
+    if mode == "buffer":
+        _run_sudo("systemctl", "enable", "audio-buffer.service")
+        _run_sudo("systemctl", "start", "audio-buffer.service")
+        if not _wait_for_audio_buffer_input(timeout=15):
+            raise RuntimeError("audio-buffer.py did not lock onto the microphone in time")
+    else:
+        _run_sudo("systemctl", "stop", "audio-buffer.service")
+        _run_sudo("systemctl", "disable", "audio-buffer.service")
+
+    EI_RUNNER_PENDING_PATH.write_text(_build_ei_runner_unit(microphone))
+    _run_sudo("cp", str(EI_RUNNER_PENDING_PATH), str(EI_RUNNER_SERVICE_PATH))
+    _run_sudo("systemctl", "daemon-reload")
+    _run_sudo("systemctl", "start", "ei-runner.service")
+    _run_sudo("systemctl", "restart", "sonos-controller.service")
+
+    return _wait_for_ei_connection(timeout=40)
+
+
+@app.route("/api/audio-mode")
+def api_audio_mode_get():
+    try:
+        content = EI_RUNNER_SERVICE_PATH.read_text()
+    except OSError as e:
+        return jsonify({"error": str(e)}), 500
+    mode = "buffer" if BUFFER_MICROPHONE in content else "classic"
+    audio_buffer_active = subprocess.run(
+        ["systemctl", "is-active", "audio-buffer.service"],
+        capture_output=True, text=True,
+    ).stdout.strip() == "active"
+    return jsonify({"mode": mode, "audio_buffer_active": audio_buffer_active})
+
+
+@app.route("/api/audio-mode", methods=["POST"])
+def api_audio_mode_post():
+    body = request.get_json(silent=True) or {}
+    target_mode = body.get("mode")
+    if target_mode not in ("classic", "buffer"):
+        return jsonify({"error": "mode must be 'classic' or 'buffer'"}), 400
+
+    try:
+        connected = _switch_audio_mode_raw(target_mode)
+    except Exception as e:
+        rolled_back = False
+        if target_mode != "classic":
+            try:
+                _switch_audio_mode_raw("classic")
+                rolled_back = True
+            except Exception:
+                pass
+        return jsonify({"error": str(e), "rolled_back": rolled_back}), 500
+
+    if not connected and target_mode != "classic":
+        rolled_back = False
+        try:
+            _switch_audio_mode_raw("classic")
+            rolled_back = True
+        except Exception:
+            pass
+        return jsonify({
+            "error": f"switched to {target_mode} but ei-runner never reconnected",
+            "rolled_back": rolled_back,
+        }), 500
+
+    return jsonify({"mode": target_mode, "connected": connected})
 
 
 if __name__ == "__main__":

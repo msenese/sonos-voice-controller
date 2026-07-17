@@ -813,10 +813,74 @@ capturesList.addEventListener("click", async (e) => {
   }
 });
 
+// --- Audio pipeline mode (Classic / Buffer) ---
+
+const audioModeStatus = document.getElementById("audio-mode-status");
+const audioModeClassicBtn = document.getElementById("audio-mode-classic");
+const audioModeBufferBtn = document.getElementById("audio-mode-buffer");
+
+function setAudioModeButtons(mode) {
+  audioModeClassicBtn.classList.toggle("primary", mode === "classic");
+  audioModeBufferBtn.classList.toggle("primary", mode === "buffer");
+}
+
+async function loadAudioMode() {
+  try {
+    const res = await fetch("/api/audio-mode");
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    setAudioModeButtons(data.mode);
+    audioModeStatus.textContent = data.mode === "buffer"
+      ? "Buffer mode: ei-runner reads from the loopback device, audio-buffer.py owns the mic. Trigger captures are active."
+      : "Classic mode: ei-runner reads the mic directly. Trigger captures are inactive.";
+  } catch (e) {
+    audioModeStatus.textContent = `Could not load audio mode: ${e.message}`;
+  }
+}
+
+async function switchAudioMode(mode) {
+  const ok = confirm(
+    `Switch to ${mode} mode? This restarts ei-runner and sonos-controller and can take up to a minute, ` +
+    `with voice control briefly unavailable during the switch. If the new mode fails to come up, it will ` +
+    `automatically roll back to Classic.`
+  );
+  if (!ok) return;
+
+  audioModeClassicBtn.disabled = true;
+  audioModeBufferBtn.disabled = true;
+  audioModeStatus.textContent = `Switching to ${mode} mode... this can take up to a minute.`;
+
+  try {
+    const res = await fetch("/api/audio-mode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      audioModeStatus.textContent = data.rolled_back
+        ? `Error: ${data.error} (automatically rolled back to Classic mode)`
+        : `Error: ${data.error}`;
+    } else {
+      audioModeStatus.textContent = `Switched to ${data.mode} mode successfully.`;
+    }
+  } catch (e) {
+    audioModeStatus.textContent = `Error: ${e.message}`;
+  } finally {
+    audioModeClassicBtn.disabled = false;
+    audioModeBufferBtn.disabled = false;
+    await loadAudioMode();
+  }
+}
+
+audioModeClassicBtn.addEventListener("click", () => switchAudioMode("classic"));
+audioModeBufferBtn.addEventListener("click", () => switchAudioMode("buffer"));
+
 pollState();
 pollSystem();
 loadSampleCounts();
 loadCaptures();
+loadAudioMode();
 setInterval(pollState, 1000);
 setInterval(pollSystem, 5000);
 setInterval(loadCaptures, 5000);
