@@ -835,10 +835,12 @@ capturesList.addEventListener("change", (e) => {
 const audioModeStatus = document.getElementById("audio-mode-status");
 const audioModeClassicBtn = document.getElementById("audio-mode-classic");
 const audioModeBufferBtn = document.getElementById("audio-mode-buffer");
+const capturesCard = document.getElementById("captures-card");
 
 function setAudioModeButtons(mode) {
   audioModeClassicBtn.classList.toggle("primary", mode === "classic");
   audioModeBufferBtn.classList.toggle("primary", mode === "buffer");
+  capturesCard.style.display = mode === "buffer" ? "" : "none";
 }
 
 async function loadAudioMode() {
@@ -847,25 +849,24 @@ async function loadAudioMode() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error);
     setAudioModeButtons(data.mode);
-    audioModeStatus.textContent = data.mode === "buffer"
-      ? "Buffer mode: ei-runner reads from the loopback device, audio-buffer.py owns the mic. Trigger captures are active."
-      : "Classic mode: ei-runner reads the mic directly. Trigger captures are inactive.";
+    audioModeStatus.textContent = data.mode === "buffer" ? "Currently On" : "Currently Off";
   } catch (e) {
     audioModeStatus.textContent = `Could not load audio mode: ${e.message}`;
   }
 }
 
 async function switchAudioMode(mode) {
+  const label = mode === "buffer" ? "On" : "Off";
   const ok = confirm(
-    `Switch to ${mode} mode? This restarts ei-runner and sonos-controller and can take up to a minute, ` +
-    `with voice control briefly unavailable during the switch. If the new mode fails to come up, it will ` +
-    `automatically roll back to Classic.`
+    `Turn Audio Capture Mode ${label}? This restarts voice detection and can take up to a minute, ` +
+    `with voice control briefly unavailable during the switch. If it fails to come back up, it will ` +
+    `automatically roll back to Off.`
   );
   if (!ok) return;
 
   audioModeClassicBtn.disabled = true;
   audioModeBufferBtn.disabled = true;
-  audioModeStatus.textContent = `Switching to ${mode} mode... this can take up to a minute.`;
+  audioModeStatus.textContent = `Switching to ${label}... this can take up to a minute.`;
 
   try {
     const res = await fetch("/api/audio-mode", {
@@ -876,10 +877,10 @@ async function switchAudioMode(mode) {
     const data = await res.json();
     if (!res.ok) {
       audioModeStatus.textContent = data.rolled_back
-        ? `Error: ${data.error} (automatically rolled back to Classic mode)`
+        ? `Error: ${data.error} (automatically rolled back to Off)`
         : `Error: ${data.error}`;
     } else {
-      audioModeStatus.textContent = `Switched to ${data.mode} mode successfully.`;
+      audioModeStatus.textContent = `Switched ${data.mode === "buffer" ? "On" : "Off"} successfully.`;
     }
   } catch (e) {
     audioModeStatus.textContent = `Error: ${e.message}`;
@@ -893,11 +894,78 @@ async function switchAudioMode(mode) {
 audioModeClassicBtn.addEventListener("click", () => switchAudioMode("classic"));
 audioModeBufferBtn.addEventListener("click", () => switchAudioMode("buffer"));
 
+// --- Sonos transport controls ---
+
+const playPauseBtn = document.getElementById("sonos-play-pause");
+const muteBtn = document.getElementById("sonos-mute");
+const volumeSlider = document.getElementById("sonos-volume");
+
+let sonosIsPlaying = false;
+let sonosIsMuted = false;
+let volumeSliderActive = false;
+
+async function pollSonos() {
+  try {
+    const res = await fetch("/api/sonos/state");
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    sonosIsPlaying = data.state === "playing";
+    sonosIsMuted = data.is_volume_muted;
+    playPauseBtn.innerHTML = sonosIsPlaying ? "&#9208;" : "&#9654;";
+    muteBtn.innerHTML = sonosIsMuted ? "&#128263;" : "&#128266;";
+    muteBtn.classList.toggle("primary", sonosIsMuted);
+    if (!volumeSliderActive && typeof data.volume_level === "number") {
+      volumeSlider.value = data.volume_level;
+    }
+  } catch (e) {
+    // Stay quiet on transient HA polling errors; the badges already surface connectivity issues.
+  }
+}
+
+playPauseBtn.addEventListener("click", async () => {
+  playPauseBtn.disabled = true;
+  try {
+    await fetch(sonosIsPlaying ? "/api/sonos/pause" : "/api/sonos/play", { method: "POST" });
+    await pollSonos();
+  } finally {
+    playPauseBtn.disabled = false;
+  }
+});
+
+muteBtn.addEventListener("click", async () => {
+  muteBtn.disabled = true;
+  try {
+    await fetch("/api/sonos/mute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ muted: !sonosIsMuted }),
+    });
+    await pollSonos();
+  } finally {
+    muteBtn.disabled = false;
+  }
+});
+
+volumeSlider.addEventListener("input", () => { volumeSliderActive = true; });
+volumeSlider.addEventListener("change", async () => {
+  try {
+    await fetch("/api/sonos/volume", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ level: Number(volumeSlider.value) }),
+    });
+  } finally {
+    volumeSliderActive = false;
+  }
+});
+
 pollState();
 pollSystem();
+pollSonos();
 loadSampleCounts();
 loadCaptures();
 loadAudioMode();
 setInterval(pollState, 1000);
 setInterval(pollSystem, 5000);
+setInterval(pollSonos, 5000);
 setInterval(loadCaptures, 5000);

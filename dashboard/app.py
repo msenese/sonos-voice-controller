@@ -901,5 +901,84 @@ def api_audio_mode_post():
     return jsonify({"mode": target_mode, "connected": connected})
 
 
+def ha_headers():
+    return {
+        "Authorization": f"Bearer {cfg.HA_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
+
+def ha_call_service(domain, service, data):
+    try:
+        r = requests.post(
+            f"{cfg.HA_URL}/api/services/{domain}/{service}",
+            headers=ha_headers(),
+            json=data,
+            timeout=5,
+        )
+    except requests.RequestException as e:
+        return str(e)
+    if r.status_code >= 300:
+        return f"HA error {r.status_code}: {r.text[:200]}"
+    return None
+
+
+@app.route("/api/sonos/state")
+def api_sonos_state():
+    try:
+        r = requests.get(f"{cfg.HA_URL}/api/states/{cfg.SONOS_ENTITY}", headers=ha_headers(), timeout=5)
+    except requests.RequestException as e:
+        return jsonify({"error": str(e)}), 502
+    if r.status_code >= 300:
+        return jsonify({"error": f"HA error {r.status_code}: {r.text[:200]}"}), 502
+    data = r.json()
+    attrs = data.get("attributes", {})
+    return jsonify({
+        "state": data.get("state"),
+        "volume_level": attrs.get("volume_level"),
+        "is_volume_muted": bool(attrs.get("is_volume_muted", False)),
+    })
+
+
+@app.route("/api/sonos/play", methods=["POST"])
+def api_sonos_play():
+    err = ha_call_service("media_player", "media_play", {"entity_id": cfg.SONOS_ENTITY})
+    if err:
+        return jsonify({"error": err}), 502
+    return jsonify({"ok": True})
+
+
+@app.route("/api/sonos/pause", methods=["POST"])
+def api_sonos_pause():
+    err = ha_call_service("media_player", "media_pause", {"entity_id": cfg.SONOS_ENTITY})
+    if err:
+        return jsonify({"error": err}), 502
+    return jsonify({"ok": True})
+
+
+@app.route("/api/sonos/mute", methods=["POST"])
+def api_sonos_mute():
+    body = request.get_json(silent=True) or {}
+    muted = bool(body.get("muted"))
+    err = ha_call_service("media_player", "volume_mute", {"entity_id": cfg.SONOS_ENTITY, "is_volume_muted": muted})
+    if err:
+        return jsonify({"error": err}), 502
+    return jsonify({"ok": True})
+
+
+@app.route("/api/sonos/volume", methods=["POST"])
+def api_sonos_volume():
+    body = request.get_json(silent=True) or {}
+    try:
+        level = float(body.get("level"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "level must be a number"}), 400
+    level = max(0.0, min(1.0, level))
+    err = ha_call_service("media_player", "volume_set", {"entity_id": cfg.SONOS_ENTITY, "volume_level": level})
+    if err:
+        return jsonify({"error": err}), 502
+    return jsonify({"ok": True})
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)

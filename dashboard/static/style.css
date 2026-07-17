@@ -101,6 +101,47 @@ h1 {
 .badge.warning .dot { background: var(--status-warning); }
 .badge.critical .dot { background: var(--status-critical); }
 
+.transport {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.transport-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 50%;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.transport-btn.primary { border-color: var(--status-critical); color: var(--status-critical); }
+
+.volume-slider {
+  width: 70px;
+  accent-color: var(--text-secondary);
+}
+
+.info-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  border: 1px solid var(--muted);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+  cursor: help;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
 .card {
   background: var(--surface-1);
   border: 1px solid var(--border);

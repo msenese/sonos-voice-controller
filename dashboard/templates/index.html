@@ -8,6 +8,11 @@
       <span class="badge" id="connection-badge"><span class="dot"></span><span id="connection-text">unknown</span></span>
       <span class="badge" id="mute-badge"><span class="dot"></span><span id="mute-text">mute: unknown</span></span>
     </div>
+    <div class="transport" id="transport">
+      <button id="sonos-play-pause" class="transport-btn" title="Play/Pause">&#9199;</button>
+      <button id="sonos-mute" class="transport-btn" title="Mute">&#128266;</button>
+      <input type="range" id="sonos-volume" class="volume-slider" min="0" max="1" step="0.01" title="Volume">
+    </div>
   </header>
 
   <div class="card">
@@ -47,16 +52,18 @@
   </div>
 
   <div class="card">
-    <h2>Audio Pipeline Mode</h2>
+    <h2>Audio Capture Mode
+      <span class="info-icon" tabindex="0" title="Off: the detector reads the microphone directly (default, most tested). On: recordings of each detection are saved below so you can review and correct them, which improves future training &mdash; but this routes audio through an extra step and is newer.">?</span>
+    </h2>
     <div class="train-row">
-      <button id="audio-mode-classic" class="primary">Classic</button>
-      <button id="audio-mode-buffer">Buffer</button>
+      <button id="audio-mode-classic" class="primary">Off</button>
+      <button id="audio-mode-buffer">On</button>
     </div>
     <div class="status-line" id="audio-mode-status">Loading current mode...</div>
   </div>
 
-  <div class="card">
-    <h2>Trigger Captures</h2>
+  <div class="card" id="captures-card" style="display:none;">
+    <h2>Recordings to Review</h2>
     <div class="status-line" id="captures-status">Loading...</div>
     <ul class="history-list" id="captures-list">
       <li class="empty">No captures yet</li>
