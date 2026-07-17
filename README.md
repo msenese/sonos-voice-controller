@@ -36,8 +36,11 @@ Four systemd services run on boot:
   volume state independent of the button.
 - **`sonos-dashboard.service`** — the Flask web dashboard (below), on port
   8080.
-- **`audio-buffer.service`** — **deployed but deliberately disabled.** See
-  "Trigger captures" below.
+- **`audio-buffer.service`** — only runs when Audio Capture Mode is On (see
+  "Audio Capture Mode" below). Owns the real microphone and forwards audio
+  into an `snd-aloop` loopback device in real time, so `ei-runner` can keep
+  detecting commands from the loopback while `audio-buffer.py` saves short
+  recordings of each detection for review.
 
 The controller writes its live state (current scores, connection status,
 detection history, mute state) to `/tmp/sonos_controller_state.json` on every
@@ -60,6 +63,44 @@ silently started picking that one instead of the real mic — producing zero
 audio and taking the whole detection pipeline down with no obvious error.
 Pinning the device explicitly makes this deterministic regardless of what
 else is loaded on the system. Don't remove this flag.
+
+### Audio Capture Mode (Off / On)
+
+The dashboard's "Audio Capture Mode" card switches which microphone
+`ei-runner` reads from, by stopping `ei-runner`, starting or stopping
+`audio-buffer.service`, rewriting `/etc/systemd/system/ei-runner.service`
+with the right `--microphone` flag, and restarting both `ei-runner` and
+`sonos-controller`. **This means the `ei-runner.service` unit file on the
+Pi is a moving target** — the copy in `services/ei-runner.service` in this
+repo is only the initial/Off-mode version installed on first setup; after
+the first toggle switch, the live file on the Pi may differ (see
+`dashboard/app.py`'s `_build_ei_runner_unit()` for the two variants it
+writes).
+
+- **Off** (`hw:1,0`, the real mic): `ei-runner` reads the microphone
+  directly. Fastest, most tested, no recordings saved.
+- **On** (`hw:2,0`, an `snd-aloop` loopback): `audio-buffer.py` owns the
+  real mic and forwards audio into the loopback in real time; `ei-runner`
+  detects commands from that loopback exactly as if it were the real mic,
+  while `audio-buffer.py` also saves a short recording of each detection
+  to `/home/msenese/trigger-captures/` for review in the dashboard's
+  "Recordings to Review" card. Costs roughly +70MB of RAM at steady state
+  on top of Off mode (measured on this Pi Zero W2's 425MB total).
+
+If a switch to On fails to reconnect, the dashboard automatically switches
+back to Off — you shouldn't ever get stuck with a dead detection pipeline
+from using this toggle, but if you do, `POST /api/audio-mode` with
+`{"mode": "classic"}` forces it back manually.
+
+`snd-aloop` needs to be loaded before On mode will work:
+
+```bash
+ssh msenese@192.168.50.99 "sudo modprobe snd-aloop"
+```
+
+It isn't currently persisted across reboots (no `/etc/modules-load.d/`
+entry) — add one if you want On mode to survive a reboot without a manual
+`modprobe`.
 
 ## Setup
 
@@ -103,20 +144,29 @@ else is loaded on the system. Don't remove this flag.
      && sudo systemctl enable --now ei-runner.service sonos-controller.service sonos-dashboard.service"
    ```
 
-   `audio-buffer.service` also deploys alongside these but should be left
-   disabled — see "Trigger captures" below.
+   `audio-buffer.service` also deploys alongside these but stays inactive
+   until you switch Audio Capture Mode On from the dashboard — don't
+   `enable --now` it here.
 
-4. Restart after future code changes:
+4. Install the sudoers rules the dashboard needs (restarting services and
+   switching Audio Capture Mode):
+
+   ```bash
+   scp services/sonos-dashboard.sudoers msenese@192.168.50.99:/tmp/
+   ssh msenese@192.168.50.99 "sudo mv /tmp/sonos-dashboard.sudoers /etc/sudoers.d/sonos-dashboard \
+     && sudo chmod 440 /etc/sudoers.d/sonos-dashboard \
+     && sudo visudo -c"
+   ```
+
+   Edit the `msenese` username in that file first if the dashboard runs as
+   a different user on your box. `sonos-controller.service` runs as root
+   (needs SPI/GPIO access); the other services run as this user.
+
+5. Restart after future code changes:
 
    ```bash
    ssh msenese@192.168.50.99 "sudo systemctl restart ei-runner.service sonos-controller.service sonos-dashboard.service"
    ```
-
-5. `sonos-controller.service` runs as root (needs SPI/GPIO access); the
-   other services run as `msenese`. A few dashboard actions need passwordless
-   `sudo` for that user — see `/etc/sudoers.d/sonos-dashboard` on the Pi
-   (restart `ei-runner`/`sonos-controller`, stop/start `ei-runner` around
-   recordings).
 
 ## Dashboard
 
@@ -138,16 +188,19 @@ It shows:
   successful activation auto-commits and pushes the new model to GitHub via
   a repo-scoped deploy key from a separate clone at `~/git-archive/` on the
   Pi.
-- **Trigger captures — built but currently inactive.** The intent: save the
-  3s of audio around every detection so you can review it, confirm it, or
-  send false positives to Edge Impulse as `unknown` training data. Blocked
-  because `edge-impulse-linux-runner` captures audio via `sox` grabbing its
-  hardware device directly and exclusively — it never goes through ALSA's
-  sharing layer, so `audio-buffer.service` and `ei-runner.service` can't both
-  hold the mic today. A fix is validated (`ei-runner` reading from an
-  `snd-aloop` loopback device that `audio-buffer.py` forwards real audio
-  into) but the duplex-forwarding implementation and soak testing aren't
-  done — don't enable `audio-buffer.service` until that's finished.
+- **Audio Capture Mode** (Off/On): switches whether `ei-runner` reads the
+  real mic directly or via the `audio-buffer.py` loopback forwarder — see
+  "Audio Capture Mode" above for the full explanation and tradeoffs.
+- **Recordings to Review** (only shown when Capture Mode is On): the ~3s
+  clip saved around each detection. "Correct" uploads it to Edge Impulse
+  under the label the detector assigned, reinforcing that class; the
+  relabel dropdown lets you upload it under the *actual* correct label when
+  the detector got it wrong (ambient noise, partial trigger, wrong wake
+  word); "Discard" deletes it without uploading anything, for clips that
+  aren't usable for training.
+- **Sonos transport controls** in the header: play/pause, mute, and a
+  volume slider that call Home Assistant's `media_player` services
+  directly, independent of voice control.
 
 ## Known assumptions to double check
 
@@ -155,9 +208,9 @@ It shows:
   `{"type": "classification", "result": {"classification": {label: score, ...}}}`,
   matching the code already deployed on the Pi.
 - The Edge Impulse ingestion upload, retrain/build/download/activate flow,
-  and sample-splitting workflow have all been exercised against the live
-  project from this repo and are working as of this writing.
-- `snd-aloop` may still be loaded on the Pi from loopback testing. It isn't
-  persisted (no `/etc/modules-load.d/` entry), so a reboot clears it. This
-  is safe either way now that `ei-runner` no longer relies on device
-  auto-selection.
+  the sample-splitting workflow, Audio Capture Mode's duplex forwarding and
+  toggle-with-rollback, and the Recordings to Review upload/relabel flow
+  have all been exercised against the live project and Pi and are working
+  as of this writing.
+- `snd-aloop` isn't persisted across reboots (no `/etc/modules-load.d/`
+  entry) — see "Audio Capture Mode" above.

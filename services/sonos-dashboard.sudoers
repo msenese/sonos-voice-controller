@@ -1,0 +1,16 @@
+# Passwordless sudo rules the dashboard needs to restart services and switch
+# Audio Capture Mode (see README.md). Install as /etc/sudoers.d/sonos-dashboard
+# with mode 440, and validate with `sudo visudo -c` before trusting it.
+#
+# Replace "msenese" with whichever user sonos-dashboard.service runs as.
+
+msenese ALL=(root) NOPASSWD: /usr/bin/systemctl restart ei-runner.service
+msenese ALL=(root) NOPASSWD: /usr/bin/systemctl stop ei-runner.service
+msenese ALL=(root) NOPASSWD: /usr/bin/systemctl start ei-runner.service
+msenese ALL=(root) NOPASSWD: /usr/bin/systemctl restart sonos-controller.service
+msenese ALL=(root) NOPASSWD: /usr/bin/systemctl start audio-buffer.service
+msenese ALL=(root) NOPASSWD: /usr/bin/systemctl stop audio-buffer.service
+msenese ALL=(root) NOPASSWD: /usr/bin/systemctl enable audio-buffer.service
+msenese ALL=(root) NOPASSWD: /usr/bin/systemctl disable audio-buffer.service
+msenese ALL=(root) NOPASSWD: /usr/bin/systemctl daemon-reload
+msenese ALL=(root) NOPASSWD: /usr/bin/cp /home/msenese/ei-runner.service.pending /etc/systemd/system/ei-runner.service
