@@ -119,14 +119,13 @@ h1 {
   line-height: 1;
 }
 
-.transport-btn.primary { border-color: var(--status-critical); color: var(--status-critical); }
-
 .volume-slider {
   width: 70px;
   accent-color: var(--text-secondary);
 }
 
 .info-icon {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -140,6 +139,31 @@ h1 {
   cursor: help;
   margin-left: 6px;
   vertical-align: middle;
+}
+
+.info-icon:hover::after,
+.info-icon:focus::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: 320px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+  text-align: left;
+  text-transform: none;
+  letter-spacing: normal;
+  white-space: pre-line;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  z-index: 20;
+  pointer-events: none;
 }
 
 .card {

@@ -900,6 +900,9 @@ const playPauseBtn = document.getElementById("sonos-play-pause");
 const muteBtn = document.getElementById("sonos-mute");
 const volumeSlider = document.getElementById("sonos-volume");
 
+const ICON_UNMUTED = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="3 9 3 15 8 15 13 20 13 4 8 9 3 9" fill="currentColor" stroke="none"/><path d="M16 8a5 5 0 0 1 0 8"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/></svg>';
+const ICON_MUTED = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="3 9 3 15 8 15 13 20 13 4 8 9 3 9" fill="currentColor" stroke="none"/><line x1="16" y1="9" x2="22" y2="15"/><line x1="22" y1="9" x2="16" y2="15"/></svg>';
+
 let sonosIsPlaying = false;
 let sonosIsMuted = false;
 let volumeSliderActive = false;
@@ -912,8 +915,7 @@ async function pollSonos() {
     sonosIsPlaying = data.state === "playing";
     sonosIsMuted = data.is_volume_muted;
     playPauseBtn.innerHTML = sonosIsPlaying ? "&#9208;" : "&#9654;";
-    muteBtn.innerHTML = sonosIsMuted ? "&#128263;" : "&#128266;";
-    muteBtn.classList.toggle("primary", sonosIsMuted);
+    muteBtn.innerHTML = sonosIsMuted ? ICON_MUTED : ICON_UNMUTED;
     if (!volumeSliderActive && typeof data.volume_level === "number") {
       volumeSlider.value = data.volume_level;
     }
