@@ -783,9 +783,17 @@ def api_model_rollback():
     if result.returncode != 0:
         return jsonify({"error": f"model file rolled back, but restart failed: {result.stderr.strip()}"}), 500
 
+    # sonos-controller's websocket client doesn't reliably reconnect on its own
+    # when ei-runner restarts underneath it -- restart it too so live scores
+    # don't silently go stale while connection_status still reads "connected".
+    try:
+        _run_sudo("systemctl", "restart", "sonos-controller.service")
+    except RuntimeError as e:
+        return jsonify({"error": f"model rolled back and ei-runner restarted, but sonos-controller restart failed: {e}"}), 500
+
     connected = _wait_for_ei_connection(timeout=40)
     if not connected:
-        return jsonify({"error": "model rolled back and ei-runner restarted, but it never reconnected"}), 500
+        return jsonify({"error": "model rolled back and both services restarted, but it never reconnected"}), 500
     return jsonify({"rolled_back": True, "connected": True})
 
 
@@ -858,6 +866,14 @@ def api_model_activate():
         return jsonify({"error": f"model file swapped, but restart failed: {e}"}), 500
     if result.returncode != 0:
         return jsonify({"error": f"model file swapped, but restart failed: {result.stderr.strip()}"}), 500
+
+    # sonos-controller's websocket client doesn't reliably reconnect on its own
+    # when ei-runner restarts underneath it -- restart it too so live scores
+    # don't silently go stale while connection_status still reads "connected".
+    try:
+        _run_sudo("systemctl", "restart", "sonos-controller.service")
+    except RuntimeError as e:
+        return jsonify({"error": f"model file swapped and ei-runner restarted, but sonos-controller restart failed: {e}"}), 500
 
     archive_result = archive_model_to_git(accuracy)
 
