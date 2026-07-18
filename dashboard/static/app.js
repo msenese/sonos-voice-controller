@@ -1065,6 +1065,21 @@ autoResumeBtn.addEventListener("click", async () => {
   }
 });
 
+// --- Collapsible cards ---
+
+document.querySelectorAll(".collapse-toggle").forEach((btn) => {
+  const container = btn.closest("[data-collapse-id]");
+  if (!container) return;
+  const storageKey = `dashboard-collapsed-${container.dataset.collapseId}`;
+  if (localStorage.getItem(storageKey) === "true") {
+    container.classList.add("collapsed");
+  }
+  btn.addEventListener("click", () => {
+    const collapsed = container.classList.toggle("collapsed");
+    localStorage.setItem(storageKey, collapsed ? "true" : "false");
+  });
+});
+
 pollState();
 pollSystem();
 pollSonos();
