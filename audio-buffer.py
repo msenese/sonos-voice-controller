@@ -1,4 +1,5 @@
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -24,26 +25,36 @@ BLOCK_BYTES = BLOCK_SIZE * 2  # int16
 # snd-aloop loopback device in real time; ei-runner is pointed at the
 # loopback's capture side instead of the real hardware (see
 # services/ei-runner.service and the Classic/Buffer toggle in the
-# dashboard). Validated pairing on this Pi: playing into hw:2,1 comes out
-# for capture on hw:2,0 (not the reverse -- ei-runner's own microphone
-# enumeration only lists hw:2,0, not hw:2,1).
+# dashboard). Validated pairing on this Pi: playing into the loopback's
+# device-1 side comes out for capture on its device-0 side (not the
+# reverse -- ei-runner's own microphone enumeration only lists the
+# loopback's device 0, not device 1).
 #
 # Input uses an `arecord` subprocess, not sounddevice/PortAudio directly:
 # PortAudio's ALSA enumeration reports the wm8960 hardware as "0 in, 2 out"
-# on this Pi regardless of device string (plughw:1,0 included), even though
-# arecord opens and reads it fine -- a PortAudio-specific enumeration
-# limitation with this card, not an ALSA one. The loopback devices *do*
-# enumerate correctly under PortAudio, so the output/forwarding side uses
-# sounddevice normally.
-INPUT_DEVICE_ARECORD = "plughw:1,0"
-OUTPUT_DEVICE_SUBSTRING = "hw:2,1"
+# on this Pi regardless of device string, even though arecord opens and
+# reads it fine -- a PortAudio-specific enumeration limitation with this
+# card, not an ALSA one. The loopback devices *do* enumerate correctly
+# under PortAudio, so the output/forwarding side uses sounddevice normally.
+#
+# Both device references are named rather than numbered -- ALSA card
+# *numbers* are assigned by load order and can shift across reboots (this
+# Pi has already swapped which of wm8960/Loopback lands on card 1 vs. 2).
+# Unlike edge-impulse-linux-runner (which only accepts numeric hw:N,0 from
+# its own enumeration), arecord and PortAudio both resolve named ALSA
+# addressing/descriptive names correctly, so no runtime resolution is
+# needed here -- just don't hardcode a card number.
+INPUT_DEVICE_ARECORD = "plughw:wm8960soundcard,0"
+OUTPUT_DEVICE_NAME = "Loopback"
+OUTPUT_DEVICE_INDEX = 1  # the loopback's second endpoint -- see pairing note above
 
 
-def find_output_device_index(substring):
+def find_output_device_index(name_substring, device_index):
+    pattern = re.compile(re.escape(name_substring) + r".*\(hw:\d+," + str(device_index) + r"\)\s*$")
     for i, d in enumerate(sd.query_devices()):
-        if substring in d["name"] and d["max_output_channels"] > 0:
+        if pattern.search(d["name"]) and d["max_output_channels"] > 0:
             return i
-    raise RuntimeError(f"no output device found matching {substring!r}")
+    raise RuntimeError(f"no output device found matching {name_substring!r} device {device_index}")
 
 
 CAPTURE_DIR = Path("/home/msenese/trigger-captures")
@@ -223,7 +234,7 @@ def delete_capture(filename):
 
 
 if __name__ == "__main__":
-    output_device_index = find_output_device_index(OUTPUT_DEVICE_SUBSTRING)
+    output_device_index = find_output_device_index(OUTPUT_DEVICE_NAME, OUTPUT_DEVICE_INDEX)
     print(f"[AUDIO] Forwarding output device: {sd.query_devices(output_device_index)['name']}")
 
     output_stream = sd.OutputStream(

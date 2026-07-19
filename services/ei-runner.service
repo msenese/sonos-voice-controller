@@ -4,7 +4,8 @@ After=network.target sound.target
 
 [Service]
 User=msenese
-ExecStart=/usr/bin/edge-impulse-linux-runner --microphone hw:1,0 --model-file /home/msenese/sonos-model.eim --disable-camera
+ExecStartPre=/bin/sh -c 'grep -q wm8960soundcard /proc/asound/cards || (echo "ei-runner: wm8960 sound card not found in /proc/asound/cards" >&2; exit 1)'
+ExecStart=/usr/bin/edge-impulse-linux-runner --microphone hw:wm8960soundcard,0 --model-file /home/msenese/sonos-model.eim --disable-camera
 Restart=always
 RestartSec=5
 

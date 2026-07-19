@@ -34,8 +34,17 @@ AUDIO_BUFFER_API = "http://localhost:8081"
 
 EI_RUNNER_SERVICE_PATH = Path("/etc/systemd/system/ei-runner.service")
 EI_RUNNER_PENDING_PATH = PROJECT_ROOT / "ei-runner.service.pending"
-CLASSIC_MICROPHONE = "hw:1,0"
-BUFFER_MICROPHONE = "hw:2,0"
+# ALSA card *numbers* are assigned by load order and can shift -- e.g. after
+# a reboot, snd-aloop and the wm8960 codec swapped slots, which previously
+# left ei-runner crash-looping against a stale "hw:2,0" that no longer
+# pointed at the intended device. edge-impulse-linux-runner only accepts
+# numeric hw:N,0 matching its own enumeration (confirmed: it rejects named
+# ALSA addressing like "hw:wm8960soundcard,0" outright), so the card number
+# has to be resolved at each startup instead of hardcoded. These are the
+# stable ALSA card *ids* (from /proc/asound/cards) used to look that number
+# up right before ei-runner starts -- see _build_ei_runner_unit().
+CLASSIC_CARD_ID = "wm8960soundcard"
+BUFFER_CARD_ID = "Loopback"
 EI_API_BASE = "https://studio.edgeimpulse.com/v1/api"
 EI_BUILD_TARGET = "runner-linux-aarch64"
 EI_BUILD_ENGINE = "tflite"
@@ -880,14 +889,39 @@ def api_model_activate():
     return jsonify({"activated": True, "archive": archive_result})
 
 
-def _build_ei_runner_unit(microphone):
+def _build_ei_runner_unit(mode):
+    card_id = BUFFER_CARD_ID if mode == "buffer" else CLASSIC_CARD_ID
+
+    # Fail fast with a clear error if the card ei-runner is about to open isn't
+    # present yet, rather than a slow crash loop (sox/ei-runner startup, then
+    # failure, then RestartSec=5 -- vs. a single grep against /proc/asound/cards).
+    if mode == "buffer":
+        missing_hint = 'run: sudo modprobe snd-aloop'
+    else:
+        missing_hint = 'check the wm8960 HAT is seated correctly'
+    precheck = (
+        f'grep -q {card_id} /proc/asound/cards || '
+        f'(echo "ei-runner: {card_id} not found in /proc/asound/cards -- {missing_hint}" >&2; exit 1)'
+    )
+
+    # Card *numbers* aren't stable across reboots (load order can change which
+    # slot a card lands in), so resolve the current number for this card id
+    # right before starting ei-runner, rather than hardcoding "hw:N,0".
+    exec_start = (
+        "/bin/sh -c "
+        f'\'CARD=$(grep -oP "^\\s*\\K[0-9]+(?=.*\\[{card_id})" /proc/asound/cards); '
+        'exec /usr/bin/edge-impulse-linux-runner --microphone "hw:$CARD,0" '
+        "--model-file /home/msenese/sonos-model.eim --disable-camera'"
+    )
+
     return f"""[Unit]
 Description=Edge Impulse Linux Runner
 After=network.target sound.target
 
 [Service]
 User=msenese
-ExecStart=/usr/bin/edge-impulse-linux-runner --microphone {microphone} --model-file /home/msenese/sonos-model.eim --disable-camera
+ExecStartPre=/bin/sh -c '{precheck}'
+ExecStart={exec_start}
 Restart=always
 RestartSec=5
 
@@ -929,8 +963,6 @@ def _wait_for_ei_connection(timeout=40, interval=2):
 
 
 def _switch_audio_mode_raw(mode):
-    microphone = BUFFER_MICROPHONE if mode == "buffer" else CLASSIC_MICROPHONE
-
     _run_sudo("systemctl", "stop", "ei-runner.service")
 
     if mode == "buffer":
@@ -948,7 +980,7 @@ def _switch_audio_mode_raw(mode):
         with _auto_resume_lock:
             _auto_resume_enabled = False
 
-    EI_RUNNER_PENDING_PATH.write_text(_build_ei_runner_unit(microphone))
+    EI_RUNNER_PENDING_PATH.write_text(_build_ei_runner_unit(mode))
     _run_sudo("cp", str(EI_RUNNER_PENDING_PATH), str(EI_RUNNER_SERVICE_PATH))
     _run_sudo("systemctl", "daemon-reload")
     _run_sudo("systemctl", "start", "ei-runner.service")
@@ -963,7 +995,7 @@ def api_audio_mode_get():
         content = EI_RUNNER_SERVICE_PATH.read_text()
     except OSError as e:
         return jsonify({"error": str(e)}), 500
-    mode = "buffer" if BUFFER_MICROPHONE in content else "classic"
+    mode = "buffer" if BUFFER_CARD_ID in content else "classic"
     audio_buffer_active = subprocess.run(
         ["systemctl", "is-active", "audio-buffer.service"],
         capture_output=True, text=True,
