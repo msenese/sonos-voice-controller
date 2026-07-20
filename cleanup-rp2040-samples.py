@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""One-off cleanup: delete every sample across all four labels (noise,
-sonos pause, sonos play, unknown) added to the project before a cutoff
-date, on the basis that everything recorded on the RP2040 device was
-uploaded before that date.
+"""One-off cleanup: delete every sample in the project (regardless of
+label) added before a cutoff date, on the basis that everything recorded
+on the RP2040 device was uploaded before that date.
 
 Filters on Edge Impulse's own "added" timestamp for each sample (an ISO
 8601 string, e.g. "2026-07-18T15:14:44.895Z") rather than any filename
@@ -10,6 +9,14 @@ pattern -- a filename-based heuristic risked also matching samples
 recorded directly in Edge Impulse Studio with the ReSpeaker HAT, which
 share the same default Studio naming shape regardless of which device
 recorded them. Date is the reliable signal here, not filename.
+
+Queries every sample project-wide with no label filter (each sample's
+own "label" field is used only for the printed summary), rather than
+iterating a hardcoded label list -- an earlier version of this script
+listed the four labels known at the time, which meant a "sonos mute"
+label added later silently never got scanned at all. A sample being
+invisible to this cleanup because nobody remembered to add its label to
+a list is exactly the failure mode this rewrite removes.
 
 The RP2040 device recorded at a much lower level than the ReSpeaker HAT
 this project actually deploys on (near-silent waveforms vs. full-amplitude
@@ -22,6 +29,7 @@ than leaving it to cause the same kind of surprise in another class later.
 Usage: python3 cleanup-rp2040-samples.py <cutoff-date YYYY-MM-DD> [--yes]
 """
 import sys
+from collections import Counter
 from datetime import datetime, timezone
 
 import requests
@@ -29,7 +37,6 @@ import requests
 import config as cfg
 
 EI_API_BASE = "https://studio.edgeimpulse.com/v1/api"
-LABELS = ["noise", "sonos pause", "sonos play", "unknown"]
 PAGE_SIZE = 100
 
 
@@ -46,14 +53,14 @@ def parse_added(added_str):
     return datetime.fromisoformat(added_str.replace("Z", "+00:00"))
 
 
-def list_samples_before(label, cutoff):
+def list_samples_before(cutoff):
     matches = []
     offset = 0
     while True:
         response = requests.get(
             f"{EI_API_BASE}/{cfg.EI_PROJECT_ID}/raw-data",
             headers=ei_headers(),
-            params={"category": "all", "labels": f'["{label}"]', "limit": PAGE_SIZE, "offset": offset},
+            params={"category": "all", "limit": PAGE_SIZE, "offset": offset},
             timeout=30,
         )
         response.raise_for_status()
@@ -93,31 +100,30 @@ def main():
         print("EI_ADMIN_API_KEY is not configured in config.py (deleting samples requires an Admin-role key). Aborting.")
         sys.exit(1)
 
-    print(f"Looking up samples added before {cutoff.date()} across all labels...")
-    all_matches = []
-    for label in LABELS:
-        matches = list_samples_before(label, cutoff)
-        if matches:
-            print(f"  {label}: {len(matches)} samples")
-        all_matches.extend(matches)
+    print(f"Looking up samples added before {cutoff.date()}, all labels, project-wide...")
+    matches = list_samples_before(cutoff)
 
-    if not all_matches:
+    if not matches:
         print("No matching samples found. Nothing to delete.")
         return
 
-    print(f"\nFound {len(all_matches)} samples added before {cutoff.date()} to delete:")
-    for s in all_matches:
-        print(f"  - {s['filename']} (added {s['added']}, id {s['id']})")
+    by_label = Counter(s.get("label", "(no label)") for s in matches)
+    print(f"\nFound {len(matches)} samples added before {cutoff.date()} to delete:")
+    for label, count in sorted(by_label.items()):
+        print(f"  {label}: {count} samples")
+    print()
+    for s in matches:
+        print(f"  - [{s.get('label', '?')}] {s['filename']} (added {s['added']}, id {s['id']})")
 
     if "--yes" not in sys.argv:
-        confirm = input(f"\nDelete all {len(all_matches)} samples above? [y/N] ")
+        confirm = input(f"\nDelete all {len(matches)} samples above? [y/N] ")
         if confirm.strip().lower() != "y":
             print("Aborted, nothing deleted.")
             return
 
     deleted = 0
     failed = 0
-    for s in all_matches:
+    for s in matches:
         response = delete_sample(s["id"])
         if response.status_code >= 300:
             print(f"Failed to delete {s['filename']} (id {s['id']}): {response.status_code} {response.text[:200]}")
