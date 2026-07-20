@@ -29,9 +29,11 @@ Four systemd services run on boot:
   command label crosses its threshold for `CONSECUTIVE_REQUIRED` messages in
   a row (and the cooldown has elapsed), calls the Home Assistant REST API to
   pause/play the Sonos entity. It also drives the APA102 LEDs (aquamarine
-  breathing = idle/listening, amber breathing = Sonos muted or at ~0 volume,
+  breathing = idle/listening, purple breathing = Sonos muted or at ~0 volume,
   green flash = command recognized, red = disconnected from the EI runner,
-  amber left-right chase = starting up / reconnecting) and toggles Sonos mute
+  amber left-right chase = starting up / reconnecting -- purple and amber
+  used to both be amber and were easy to mix up at a glance) and toggles
+  Sonos mute
   via the GPIO17 button. Polls Home Assistant every 5s for the Sonos mute/
   volume state independent of the button.
 - **`sonos-dashboard.service`** — the Flask web dashboard (below), on port

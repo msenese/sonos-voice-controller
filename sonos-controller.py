@@ -101,11 +101,19 @@ async def breathe():
     step = 0
     while True:
         if not led_override:
-            brightness = max(3, min(25, int((math.sin(step) + 1) / 2 * 45)))
             if is_muted:
-                muted_brightness = max(2, int(brightness * 0.6))
-                set_leds(muted_brightness, int(muted_brightness * 0.4), 0)
+                # Computed directly from the sine wave rather than scaling down
+                # the (already clamped-to-3..25) non-muted `brightness` value --
+                # shrinking that by 0.25 and flooring at 2 collapsed the usable
+                # range to ~2 integer steps, so it looked like it snapped
+                # between two fixed colors instead of breathing smoothly.
+                muted_brightness = max(2, int(2 + (math.sin(step) + 1) / 2 * 6))
+                # Red must never truncate to 0 here -- int(2 * 0.25) and
+                # int(3 * 0.25) both round down to 0, which briefly turned the
+                # dim end of the cycle pure blue with no violet tint at all.
+                set_leds(max(1, int(muted_brightness * 0.25)), int(muted_brightness * 0.1), muted_brightness)
             else:
+                brightness = max(3, min(25, int((math.sin(step) + 1) / 2 * 45)))
                 set_leds(0, brightness, int(brightness * 0.8))
             step += 0.04
         await asyncio.sleep(0.05)
