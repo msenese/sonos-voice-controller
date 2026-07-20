@@ -54,7 +54,7 @@ EI_API_BASE = "https://studio.edgeimpulse.com/v1/api"
 EI_BUILD_TARGET = "runner-linux-aarch64"
 EI_BUILD_ENGINE = "tflite"
 
-LABELS = ["noise", "sonos pause", "sonos play", "unknown"]
+LABELS = ["noise", "sonos pause", "sonos play", "sonos mute", "unknown"]
 
 CONFIG_FIELDS = {
     "THRESHOLD": {"type": float, "min": 0.0, "max": 1.0},
