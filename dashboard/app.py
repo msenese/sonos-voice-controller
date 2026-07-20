@@ -20,7 +20,12 @@ import config as cfg  # noqa: E402
 STATE_FILE = Path("/tmp/sonos_controller_state.json")
 TRAINING_DIR = PROJECT_ROOT / "training_samples"
 CONFIG_PATH = PROJECT_ROOT / "config.py"
-AUDIO_DEVICE = "plughw:1,0"
+# Named by ALSA card id, not card number -- see the note by CLASSIC_CARD_ID
+# below. This is the same class of bug that caused tonight's ei-runner
+# crash loop and audio-buffer.py silence, just a third hardcoded spot that
+# hadn't been caught until Training Mode recordings started coming back
+# blank after this Pi's card numbers flipped again.
+AUDIO_DEVICE = "plughw:wm8960soundcard,0"
 
 LIVE_MODEL_PATH = PROJECT_ROOT / "sonos-model.eim"
 MODEL_BACKUP_PATH = PROJECT_ROOT / "sonos-model-previous.eim"
@@ -216,7 +221,7 @@ def api_mic_level():
 
     try:
         result = subprocess.run(
-            ["amixer", "-c", "1", "sset", "Capture", str(level)],
+            ["amixer", "-c", CLASSIC_CARD_ID, "sset", "Capture", str(level)],
             capture_output=True, text=True,
         )
     except OSError as e:
