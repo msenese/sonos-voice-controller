@@ -2,9 +2,15 @@ const SERIES_COLORS = {
   "noise": "var(--series-1)",
   "sonos pause": "var(--series-2)",
   "sonos play": "var(--series-3)",
-  "unknown": "var(--series-4)",
+  "sonos mute": "var(--series-4)",
+  "unknown": "var(--series-5)",
 };
-const LABEL_ORDER = ["noise", "sonos pause", "sonos play", "unknown"];
+// Derived from window.LABELS (rendered server-side from app.py's LABELS)
+// rather than a second hardcoded copy -- a prior version duplicated this
+// list here, and it silently fell out of sync when a label was added on
+// the Python side only, breaking both Live Scores and sample counts for
+// the new label without any error.
+const LABEL_ORDER = window.LABELS || [];
 
 const metersEl = document.getElementById("meters");
 const meterEls = {};
@@ -13,7 +19,7 @@ for (const label of LABEL_ORDER) {
   row.className = "meter-row";
   row.innerHTML = `
     <div class="meter-label">${label}</div>
-    <div class="meter-track"><div class="meter-fill" style="background:${SERIES_COLORS[label]}"></div></div>
+    <div class="meter-track"><div class="meter-fill" style="background:${SERIES_COLORS[label] || "var(--muted)"}"></div></div>
     <div class="meter-value">0%</div>
   `;
   metersEl.appendChild(row);
@@ -284,6 +290,11 @@ let audioBuffer = null;
 let totalDurationMs = 0;
 let segments = [];
 let currentSampleId = null;
+
+function updateSplitButtonState() {
+  splitBtn.disabled = segments.length === 0;
+  splitBtn.textContent = segments.length === 1 ? "Save Sample" : "Save Samples";
+}
 let currentFilename = null;
 let draggingHandle = null;
 let segmentPlaybackHandler = null;
@@ -452,7 +463,7 @@ waveformCanvas.addEventListener("dblclick", (e) => {
   if (idx >= 0) {
     segments.splice(idx, 1);
     drawWaveform();
-    splitBtn.disabled = segments.length === 0;
+    updateSplitButtonState();
   }
 });
 
@@ -476,7 +487,7 @@ async function openSegmentReview(filename) {
   currentFilename = filename;
   audioBuffer = null;
   totalDurationMs = 0;
-  splitBtn.disabled = true;
+  updateSplitButtonState();
   segmentReviewEl.style.display = "block";
   segmentAudio.src = `/training-samples/${filename}`;
   segmentStatus.textContent = "Loading waveform...";
@@ -526,7 +537,7 @@ findSegmentsBtn.addEventListener("click", async () => {
     if (!res.ok) throw new Error(data.error);
     segments = data.segments;
     drawWaveform();
-    splitBtn.disabled = segments.length === 0;
+    updateSplitButtonState();
     segmentStatus.textContent = `Found ${segments.length} segment(s). Drag green handles to adjust, double-click a segment to remove it.`;
   } catch (e) {
     segmentStatus.textContent = `Error: ${e.message}`;
@@ -539,7 +550,7 @@ addSegmentBtn.addEventListener("click", () => {
   const start = Math.max(0, totalDurationMs / 2 - segmentLengthMs / 2);
   segments.push({ startMs: start, endMs: Math.min(totalDurationMs, start + segmentLengthMs) });
   drawWaveform();
-  splitBtn.disabled = false;
+  updateSplitButtonState();
 });
 
 splitBtn.addEventListener("click", async () => {
@@ -578,9 +589,10 @@ splitBtn.addEventListener("click", async () => {
     currentFilename = null;
     audioBuffer = null;
     totalDurationMs = 0;
+    updateSplitButtonState();
   } catch (e) {
     segmentStatus.textContent = `Error: ${e.message}`;
-    splitBtn.disabled = false;
+    updateSplitButtonState();
   }
 });
 

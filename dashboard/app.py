@@ -607,7 +607,12 @@ def api_model_sample_counts():
 
     return jsonify({
         "counts": {
-            label: {"total": count, "new": count - baseline.get(label, count)}
+            # A label missing from the baseline (e.g. added after the last
+            # snapshot) defaults to 0, not to its own current count -- it was
+            # never tracked at baseline time, so everything there now is
+            # genuinely new. Defaulting to `count` made "new" always compute
+            # to 0 for any label added after the fact, silently hiding growth.
+            label: {"total": count, "new": count - baseline.get(label, 0)}
             for label, count in counts.items()
         },
         "baseline_at": baseline_at,

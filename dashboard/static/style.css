@@ -11,7 +11,8 @@
   --series-1: #2a78d6; /* noise */
   --series-2: #1baf7a; /* sonos pause */
   --series-3: #eda100; /* sonos play */
-  --series-4: #008300; /* unknown */
+  --series-4: #d6368f; /* sonos mute */
+  --series-5: #008300; /* unknown */
 
   --status-good:     #0ca30c;
   --status-warning:  #fab219;
@@ -34,7 +35,8 @@
     --series-1: #3987e5;
     --series-2: #199e70;
     --series-3: #c98500;
-    --series-4: #008300;
+    --series-4: #e85fb0;
+    --series-5: #008300;
 
     --status-good:     #0ca30c;
     --status-warning:  #fab219;
@@ -219,6 +221,12 @@ h1 {
 
 .card.collapsed > *:not(h2),
 .workflow-group.collapsed > *:not(.workflow-group-label) {
+  display: none;
+}
+
+/* Mic Capture Level carries the sole chevron for this pair, but both
+   headers stay visible when collapsed -- only the bodies hide. */
+.collapsible-pair.collapsed .card > *:not(h2) {
   display: none;
 }
 

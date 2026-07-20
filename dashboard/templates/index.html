@@ -51,9 +51,9 @@
     </ul>
   </div>
 
-  <div class="grid-2">
-    <div class="card" data-collapse-id="thresholds">
-      <h2><span class="card-title">Thresholds</span><button class="collapse-toggle" aria-label="Collapse section"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button></h2>
+  <div class="grid-2 collapsible-pair" data-collapse-id="mic-capture-level">
+    <div class="card">
+      <h2>Thresholds</h2>
       <div class="field">
         <div class="field-head"><span>Sonos Pause threshold</span><span class="value" id="threshold-value">&mdash;</span></div>
         <input type="range" id="threshold" min="0" max="1" step="0.01">
@@ -72,7 +72,7 @@
       </div>
     </div>
 
-    <div class="card" data-collapse-id="mic-capture-level">
+    <div class="card">
       <h2><span class="card-title">Mic Capture Level</span><button class="collapse-toggle" aria-label="Collapse section"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button></h2>
       <div class="field">
         <div class="field-head"><span>Capture (0-63)</span><span class="value" id="mic-level-value">50</span></div>
@@ -131,7 +131,7 @@
         <div class="train-row">
           <button id="find-segments-btn">Find Segments</button>
           <button id="add-segment-btn">Add Segment</button>
-          <button id="split-samples-btn" class="primary" disabled>Split into Samples</button>
+          <button id="split-samples-btn" class="primary" disabled>Save Samples</button>
         </div>
         <canvas id="waveform-canvas" width="900" height="140" style="width:100%; height:140px; display:block; margin-top:10px; border-radius:6px; border:1px solid var(--border); touch-action:none;"></canvas>
         <audio id="segment-audio" controls style="width:100%; margin-top:8px;"></audio>
