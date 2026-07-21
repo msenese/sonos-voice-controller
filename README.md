@@ -221,6 +221,36 @@ It shows:
   you're done testing rather than leaving it running unattended, since it
   will resume playback after *any* pause, including ones you meant.
 
+## Known-good milestones
+
+The dashboard's "Rollback to Previous Model" only remembers one prior
+generation — fine for undoing a bad retrain, but it silently stops
+reaching any given model as soon as two more get activated after it. For
+a model worth being able to restore indefinitely (e.g. one that's been
+demoed or otherwise validated), tag its commit instead:
+
+```bash
+git tag -a milestone-name <commit> -m "why this one matters"
+git push origin milestone-name
+```
+
+Find the right commit by matching the live model's activation metadata
+(`GET /api/model/status` on the dashboard) against the auto-archive
+commit with the same date/accuracy, and confirm it's the exact same
+artifact — not just close — before tagging:
+
+```bash
+git show <commit>:models/sonos-model-current.eim | shasum -a 256
+ssh msenese@192.168.50.99 "sha256sum /home/msenese/sonos-model.eim"
+```
+
+**`milestone-v1`** — activated 2026-07-18 19:13 PDT, 97.7% validation
+accuracy, demoed live to staff engineers. Verified byte-for-byte
+identical to the model running on the Pi at tagging time (SHA256
+`727c6830...`). To restore it: `git show milestone-v1:models/sonos-model-current.eim > sonos-model.eim`,
+then deploy and activate that file the normal way (Setup step 2, or via
+the dashboard's Build & Activate flow using this file directly).
+
 ## Known assumptions to double check
 
 - The EI runner's websocket message shape is assumed to be
