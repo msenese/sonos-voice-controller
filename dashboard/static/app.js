@@ -33,6 +33,7 @@ let configInitialized = false;
 const sliders = {
   threshold: document.getElementById("threshold"),
   sonos_play_threshold: document.getElementById("sonos_play_threshold"),
+  sonos_mute_threshold: document.getElementById("sonos_mute_threshold"),
   cooldown: document.getElementById("cooldown"),
   consecutive_required: document.getElementById("consecutive_required"),
 };

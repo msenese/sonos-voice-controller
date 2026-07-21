@@ -159,7 +159,37 @@ def post_capture(label, score):
         pass
 
 
+def toggle_mute():
+    # Shared by the physical button and the "sonos mute" voice trigger, so
+    # both paths produce identical behavior: read the current HA mute
+    # state, flip it, and let breathe() pick up the new `is_muted` value
+    # for LED feedback (violet breathing) exactly as it already does for
+    # the button.
+    global is_muted
+    headers = {
+        "Authorization": f"Bearer {cfg.HA_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    response = requests.get(f"{cfg.HA_URL}/api/states/{cfg.SONOS_ENTITY}", headers=headers, timeout=HA_REQUEST_TIMEOUT)
+    state = response.json()
+    is_muted_current = state.get("attributes", {}).get("is_volume_muted", False)
+    requests.post(f"{cfg.HA_URL}/api/services/media_player/volume_mute",
+        headers=headers,
+        json={"entity_id": cfg.SONOS_ENTITY, "is_volume_muted": not is_muted_current},
+        timeout=HA_REQUEST_TIMEOUT)
+    is_muted = not is_muted_current
+    write_state()
+
+
 def trigger_ha(action):
+    if action == "sonos mute":
+        try:
+            toggle_mute()
+            print(f"[HA] Toggled mute via voice (now {'muted' if is_muted else 'unmuted'})")
+        except Exception as e:
+            print(f"[HA] mute toggle error: {e}")
+        return
+
     headers = {
         "Authorization": f"Bearer {cfg.HA_TOKEN}",
         "Content-Type": "application/json"
@@ -183,26 +213,13 @@ def trigger_ha(action):
 
 
 async def watch_button():
-    global is_muted
     last_state = GPIO.input(BUTTON_PIN)
     while True:
         try:
             current_state = GPIO.input(BUTTON_PIN)
             if last_state == GPIO.HIGH and current_state == GPIO.LOW:
                 print("[BTN] Button pressed - toggling mute")
-                headers = {
-                    "Authorization": f"Bearer {cfg.HA_TOKEN}",
-                    "Content-Type": "application/json"
-                }
-                response = requests.get(f"{cfg.HA_URL}/api/states/{cfg.SONOS_ENTITY}", headers=headers, timeout=HA_REQUEST_TIMEOUT)
-                state = response.json()
-                is_muted_current = state.get("attributes", {}).get("is_volume_muted", False)
-                requests.post(f"{cfg.HA_URL}/api/services/media_player/volume_mute",
-                    headers=headers,
-                    json={"entity_id": cfg.SONOS_ENTITY, "is_volume_muted": not is_muted_current},
-                    timeout=HA_REQUEST_TIMEOUT)
-                is_muted = not is_muted_current
-                write_state()
+                toggle_mute()
                 await flash_green()
             last_state = current_state
         except Exception as e:
@@ -253,8 +270,12 @@ async def listen():
                     latest_scores = result
                     now = time.time()
                     for label, score in result.items():
-                        if label in ["sonos pause", "sonos play"]:
-                            threshold = cfg.SONOS_PLAY_THRESHOLD if label == "sonos play" else cfg.THRESHOLD
+                        if label in ["sonos pause", "sonos play", "sonos mute"]:
+                            threshold = (
+                                cfg.SONOS_PLAY_THRESHOLD if label == "sonos play"
+                                else cfg.SONOS_MUTE_THRESHOLD if label == "sonos mute"
+                                else cfg.THRESHOLD
+                            )
                             if score >= threshold:
                                 consecutive_count[label] = consecutive_count.get(label, 0) + 1
                                 if consecutive_count[label] >= cfg.CONSECUTIVE_REQUIRED:

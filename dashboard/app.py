@@ -62,6 +62,7 @@ LABELS = ["noise", "sonos pause", "sonos play", "sonos mute", "unknown"]
 CONFIG_FIELDS = {
     "THRESHOLD": {"type": float, "min": 0.0, "max": 1.0},
     "SONOS_PLAY_THRESHOLD": {"type": float, "min": 0.0, "max": 1.0},
+    "SONOS_MUTE_THRESHOLD": {"type": float, "min": 0.0, "max": 1.0},
     "COOLDOWN": {"type": float, "min": 0.0, "max": 30.0},
     "CONSECUTIVE_REQUIRED": {"type": int, "min": 1, "max": 10},
 }
@@ -172,6 +173,7 @@ def api_state():
     state["config"] = {
         "threshold": cfg.THRESHOLD,
         "sonos_play_threshold": cfg.SONOS_PLAY_THRESHOLD,
+        "sonos_mute_threshold": cfg.SONOS_MUTE_THRESHOLD,
         "cooldown": cfg.COOLDOWN,
         "consecutive_required": cfg.CONSECUTIVE_REQUIRED,
     }
@@ -207,6 +209,7 @@ def api_config():
     return jsonify({
         "threshold": cfg.THRESHOLD,
         "sonos_play_threshold": cfg.SONOS_PLAY_THRESHOLD,
+        "sonos_mute_threshold": cfg.SONOS_MUTE_THRESHOLD,
         "cooldown": cfg.COOLDOWN,
         "consecutive_required": cfg.CONSECUTIVE_REQUIRED,
     })
