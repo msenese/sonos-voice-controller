@@ -311,17 +311,32 @@ h1 {
 
 .stat-tile {
   text-align: center;
+  min-width: 0;
 }
 
 .stat-value {
   font-size: 22px;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .stat-label {
   font-size: 12px;
   color: var(--muted);
   margin-top: 2px;
+}
+
+/* System Status packs a 4th tile (CPU) into the same row -- shrink text
+   to fit rather than widening the card or wrapping to a second line. */
+#stat-uptime, #stat-temp, #stat-mem, #stat-cpu {
+  font-size: 16px;
+}
+
+.stat-tiles:has(#stat-cpu) {
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
 }
 
 .field {

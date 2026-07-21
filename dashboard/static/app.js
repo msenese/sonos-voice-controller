@@ -171,6 +171,9 @@ async function pollSystem() {
     const totalMb = Math.round(stat.mem_total_kb / 1024);
     document.getElementById("stat-mem").textContent = `${usedMb}/${totalMb} MB`;
   }
+  if (stat.cpu_percent != null) {
+    document.getElementById("stat-cpu").textContent = `${Math.round(stat.cpu_percent)}%`;
+  }
 }
 
 const micSlider = document.getElementById("mic-level");

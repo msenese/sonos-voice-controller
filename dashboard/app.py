@@ -237,6 +237,35 @@ def api_mic_level():
     return jsonify({"level": level})
 
 
+_last_cpu_times = None
+
+
+def _cpu_percent():
+    # /proc/stat's aggregate "cpu" line has no notion of "percent used" on
+    # its own -- it's a running total of jiffies since boot, so usage has to
+    # be derived from the delta between two reads. Stashing the previous
+    # read in module state (rather than sleeping inside the request) means
+    # each poll's delta spans the time since the last poll, which the
+    # frontend already does every 5s.
+    global _last_cpu_times
+    try:
+        fields = Path("/proc/stat").read_text().splitlines()[0].split()[1:]
+        values = [int(f) for f in fields]
+    except (OSError, ValueError, IndexError):
+        return None
+    idle = values[3] + values[4]  # idle + iowait
+    total = sum(values)
+    percent = None
+    if _last_cpu_times is not None:
+        prev_total, prev_idle = _last_cpu_times
+        total_delta = total - prev_total
+        idle_delta = idle - prev_idle
+        if total_delta > 0:
+            percent = max(0.0, min(100.0, (1 - idle_delta / total_delta) * 100))
+    _last_cpu_times = (total, idle)
+    return percent
+
+
 @app.route("/api/system")
 def api_system():
     uptime_seconds = None
@@ -273,6 +302,7 @@ def api_system():
         "cpu_temp_c": cpu_temp_c,
         "mem_total_kb": mem_total_kb,
         "mem_used_kb": mem_used_kb,
+        "cpu_percent": _cpu_percent(),
     })
 
 
