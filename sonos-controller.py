@@ -24,6 +24,7 @@ latest_scores = {}
 detection_history = []
 connection_status = "disconnected"
 is_muted = None
+is_paused = None
 
 _config_mtime = os.path.getmtime(cfg.__file__)
 
@@ -112,6 +113,17 @@ async def breathe():
                 # int(3 * 0.25) both round down to 0, which briefly turned the
                 # dim end of the cycle pure blue with no violet tint at all.
                 set_leds(max(1, int(muted_brightness * 0.25)), int(muted_brightness * 0.1), muted_brightness)
+            elif is_paused:
+                # Reuses the same wide 3-25 sine curve as the normal (playing)
+                # state -- proven smooth already -- rather than a new range,
+                # but halves it before output: driving both R and G to the
+                # same level reads as much brighter than G alone at an
+                # identical number (human vision weights green more heavily
+                # than red), so the raw curve looked blown-out and barely
+                # breathing at all until it was scaled down.
+                brightness = max(3, min(25, int((math.sin(step) + 1) / 2 * 45)))
+                yellow_level = max(1, int(brightness * 0.5))
+                set_leds(yellow_level, yellow_level, 0)
             else:
                 brightness = max(3, min(25, int((math.sin(step) + 1) / 2 * 45)))
                 set_leds(0, brightness, int(brightness * 0.8))
@@ -182,6 +194,8 @@ def toggle_mute():
 
 
 def trigger_ha(action):
+    global is_paused
+
     if action == "sonos mute":
         try:
             toggle_mute()
@@ -208,6 +222,12 @@ def trigger_ha(action):
             print(f"[HA] {endpoint} failed: HTTP {response.status_code} {response.text[:200]}")
         else:
             print(f"[HA] {'Paused' if action == 'sonos pause' else 'Played'} Sonos")
+            # Update immediately rather than waiting up to 5s for
+            # poll_player_state()'s next cycle, so the LED color change
+            # (breathe()'s is_paused check) tracks the voice command instead
+            # of visibly lagging behind it.
+            is_paused = action == "sonos pause"
+            write_state()
     except Exception as e:
         print(f"[HA] {endpoint} error: {e}")
 
@@ -227,8 +247,8 @@ async def watch_button():
         await asyncio.sleep(0.05)
 
 
-async def poll_mute_state():
-    global is_muted
+async def poll_player_state():
+    global is_muted, is_paused
     while True:
         try:
             headers = {
@@ -241,6 +261,7 @@ async def poll_mute_state():
             volume_muted = attributes.get("is_volume_muted", False)
             volume_level = attributes.get("volume_level", 1.0)
             is_muted = bool(volume_muted) or volume_level <= 0.02
+            is_paused = state.get("state") == "paused"
             write_state()
         except Exception as e:
             print(f"[HA] Poll error: {e}")
@@ -306,6 +327,6 @@ async def listen():
 
 
 async def main():
-    await asyncio.gather(breathe(), listen(), watch_button(), poll_mute_state())
+    await asyncio.gather(breathe(), listen(), watch_button(), poll_player_state())
 
 asyncio.run(main())
