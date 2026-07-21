@@ -1,17 +1,20 @@
+import array
 import importlib
 import io
 import json
+import queue
 import re
 import subprocess
 import sys
 import threading
 import time
+import wave
 import zipfile
 from datetime import date
 from pathlib import Path
 
 import requests
-from flask import Flask, jsonify, render_template, request, send_from_directory
+from flask import Flask, Response, jsonify, render_template, request, send_from_directory
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -270,8 +273,42 @@ def api_system():
     })
 
 
-_active_recording = {"proc": None, "filename": None, "label": None, "duration": None, "capture_duration": None}
+_active_recording = {
+    "proc": None, "filename": None, "label": None, "duration": None, "capture_duration": None,
+    "path": None, "raw_chunks": None, "reader_thread": None,
+}
 PREROLL_SECONDS = 1
+
+# 50ms blocks -- fine enough for a live level meter, coarse enough that a
+# 20s recording (worst case) is still only ~420 small floats per response.
+RECORD_BLOCK_SAMPLES = 800
+RECORD_BLOCK_BYTES = RECORD_BLOCK_SAMPLES * 2  # int16
+CLIP_THRESHOLD = 32000  # near int16's max magnitude (32767)
+
+# Pushed to by the reader thread and consumed by the SSE stream endpoint,
+# so the browser gets each block the moment it's computed instead of
+# polling and re-asking "anything new yet?" every 150ms.
+_recording_events = queue.Queue()
+
+
+def _record_reader_thread(proc, total_bytes_needed, raw_chunks):
+    bytes_read = 0
+    while bytes_read < total_bytes_needed:
+        raw = proc.stdout.read(RECORD_BLOCK_BYTES)
+        if not raw:
+            break
+        raw_chunks.append(raw)
+        bytes_read += len(raw)
+        samples = array.array("h")
+        samples.frombytes(raw if len(raw) % 2 == 0 else raw[:-1])
+        if samples:
+            peak = max(abs(s) for s in samples)
+            _recording_events.put_nowait({
+                "level": min(1.0, peak / 32768.0),
+                "clipping": peak >= CLIP_THRESHOLD,
+            })
+    proc.kill()
+    proc.wait()
 
 
 def _resume_listening_services():
@@ -322,24 +359,59 @@ def api_train_record_start():
     # between "recording started" and the user actually speaking, so the
     # start of the word never gets clipped.
     capture_duration = round(duration) + PREROLL_SECONDS
+    total_bytes_needed = capture_duration * 16000 * 2  # sample rate * int16
+
+    # Raw stdout stream (like audio-buffer.py's own input thread) rather than
+    # a fixed "-d duration file.wav" invocation -- lets a background thread
+    # expose live per-block amplitude while recording is still in progress,
+    # for the level meter / clipping indicator, instead of only finding out
+    # what was captured after the fact.
     try:
         proc = subprocess.Popen(
             [
                 "arecord", "-D", AUDIO_DEVICE,
                 "-f", "S16_LE", "-c", "1", "-r", "16000",
-                "-d", str(capture_duration), str(path),
+                "-t", "raw", "-q",
             ],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
     except OSError as e:
         _resume_listening_services()
         return jsonify({"error": f"could not run arecord: {e}"}), 500
 
+    # Drop any stale events left over from a previous recording so the SSE
+    # stream doesn't replay them at the start of this one.
+    while not _recording_events.empty():
+        try:
+            _recording_events.get_nowait()
+        except queue.Empty:
+            break
+
+    raw_chunks = []
+    reader_thread = threading.Thread(
+        target=_record_reader_thread, args=(proc, total_bytes_needed, raw_chunks), daemon=True,
+    )
+    reader_thread.start()
+
     _active_recording.update({
         "proc": proc, "filename": filename, "label": label,
         "duration": duration, "capture_duration": capture_duration,
+        "path": path, "raw_chunks": raw_chunks, "reader_thread": reader_thread,
     })
     return jsonify({"filename": filename, "label": label, "duration": duration, "preroll": PREROLL_SECONDS})
+
+
+@app.route("/api/train/record/levels/stream")
+def api_train_record_levels_stream():
+    def generate():
+        while _active_recording["proc"] is not None:
+            try:
+                event = _recording_events.get(timeout=1)
+            except queue.Empty:
+                continue
+            yield f"data: {json.dumps(event)}\n\n"
+
+    return Response(generate(), mimetype="text/event-stream")
 
 
 @app.route("/api/train/record/finish", methods=["POST"])
@@ -352,23 +424,31 @@ def api_train_record_finish():
     capture_duration = _active_recording["capture_duration"]
     filename = _active_recording["filename"]
     label = _active_recording["label"]
+    path = _active_recording["path"]
+    raw_chunks = _active_recording["raw_chunks"]
+    reader_thread = _active_recording["reader_thread"]
 
-    try:
-        _, stderr = proc.communicate(timeout=capture_duration + 10)
-        returncode = proc.returncode
-    except subprocess.TimeoutExpired:
+    reader_thread.join(timeout=capture_duration + 10)
+    if proc.poll() is None:
         proc.kill()
-        _, stderr = proc.communicate()
-        returncode = -1
-    finally:
-        _resume_listening_services()
-        _active_recording.update({
-            "proc": None, "filename": None, "label": None,
-            "duration": None, "capture_duration": None,
-        })
+        proc.wait()
 
-    if returncode != 0:
-        return jsonify({"error": (stderr or "arecord failed").strip()}), 500
+    _resume_listening_services()
+    _active_recording.update({
+        "proc": None, "filename": None, "label": None, "duration": None, "capture_duration": None,
+        "path": None, "raw_chunks": None, "reader_thread": None,
+    })
+
+    raw_data = b"".join(raw_chunks)
+    if not raw_data:
+        return jsonify({"error": "no audio captured -- arecord produced no data"}), 500
+
+    with wave.open(str(path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(16000)
+        wf.writeframes(raw_data)
+
     return jsonify({"filename": filename, "label": label, "duration": duration})
 
 
@@ -1164,4 +1244,8 @@ def api_sonos_auto_resume_post():
 
 if __name__ == "__main__":
     threading.Thread(target=_auto_resume_loop, daemon=True).start()
-    app.run(host="0.0.0.0", port=8080)
+    # threaded=True: the dev server is otherwise single-threaded, and the
+    # SSE stream endpoint holds its request open for the whole recording --
+    # without this every other request (including /finish, which is what
+    # lets that stream end) would queue behind it and the app would hang.
+    app.run(host="0.0.0.0", port=8080, threaded=True)

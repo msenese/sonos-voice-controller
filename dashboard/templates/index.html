@@ -123,6 +123,11 @@
       </div>
       <div class="status-line" id="train-status">No recording yet. Recording briefly pauses live keyword spotting (the mic can only be open by one process at a time).</div>
 
+      <div id="record-levels-row" style="display:none; margin-top:10px;">
+        <canvas id="record-levels-canvas" width="900" height="60" style="width:100%; height:60px; display:block; border-radius:6px; border:1px solid var(--border);"></canvas>
+        <div class="status-line" id="record-clipping-status" style="display:none; color:var(--status-critical);">&#9888;&#65039; Clipping detected — try lowering the Mic Capture Level.</div>
+      </div>
+
       <div id="segment-review" style="display:none; margin-top:16px; padding-top:16px; border-top:1px solid var(--gridline);">
         <div class="field">
           <div class="field-head"><span>Segment length (ms)</span><span class="value" id="segment-length-value">1000</span></div>

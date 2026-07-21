@@ -189,6 +189,70 @@ const trainStatus = document.getElementById("train-status");
 const uploadBtn = document.getElementById("train-upload");
 const recordBtn = document.getElementById("train-record");
 
+// --- Live level meter during recording ---
+
+const recordLevelsRow = document.getElementById("record-levels-row");
+const recordLevelsCanvas = document.getElementById("record-levels-canvas");
+const recordLevelsCtx = recordLevelsCanvas.getContext("2d");
+const recordClippingStatus = document.getElementById("record-clipping-status");
+
+// Always shows only the most recent BAR_COUNT blocks, spanning the full
+// canvas width -- a continuously-refreshing live meter rather than a
+// scrolling history that grows/fills in as the recording progresses.
+const RECORD_LEVELS_BAR_COUNT = 40;
+
+function drawRecordLevels(levels, clipping) {
+  const w = recordLevelsCanvas.width;
+  const h = recordLevelsCanvas.height;
+  recordLevelsCtx.clearRect(0, 0, w, h);
+  const gap = 2;
+  const barWidth = (w / RECORD_LEVELS_BAR_COUNT) - gap;
+  const visible = levels.slice(-RECORD_LEVELS_BAR_COUNT);
+  const style = getComputedStyle(document.documentElement);
+  const normalColor = style.getPropertyValue("--series-1").trim();
+  const clipColor = style.getPropertyValue("--status-critical").trim();
+  visible.forEach((level, i) => {
+    const barHeight = Math.max(2, level * h);
+    const x = i * (w / RECORD_LEVELS_BAR_COUNT);
+    const isClipped = level >= 0.976; // matches backend's CLIP_THRESHOLD / 32768
+    recordLevelsCtx.fillStyle = isClipped ? clipColor : normalColor;
+    recordLevelsCtx.fillRect(x, (h - barHeight) / 2, barWidth, barHeight);
+  });
+  recordClippingStatus.style.display = clipping ? "block" : "none";
+}
+
+let recordLevelsSource = null;
+let recordLevelsBuffer = [];
+let recordLevelsClipped = false;
+
+// Server-Sent Events instead of polling -- the backend pushes each block
+// the instant it's computed over one open connection, rather than the
+// browser re-asking "anything new yet?" every 150ms (which felt laggy).
+function startRecordLevelsPolling() {
+  recordLevelsRow.style.display = "block";
+  recordLevelsBuffer = [];
+  recordLevelsClipped = false;
+  drawRecordLevels([], false);
+  recordLevelsSource = new EventSource("/api/train/record/levels/stream");
+  recordLevelsSource.onmessage = (e) => {
+    const data = JSON.parse(e.data);
+    recordLevelsBuffer.push(data.level);
+    if (data.clipping) recordLevelsClipped = true;
+    drawRecordLevels(recordLevelsBuffer, recordLevelsClipped);
+  };
+}
+
+function stopRecordLevelsPolling() {
+  if (recordLevelsSource) {
+    recordLevelsSource.close();
+    recordLevelsSource = null;
+  }
+  // The WAV file exists at this point -- no need to keep the meter (or its
+  // last static frame) on screen once there's nothing live to show.
+  recordLevelsRow.style.display = "none";
+  recordClippingStatus.style.display = "none";
+}
+
 recordBtn.addEventListener("click", async () => {
   const label = document.getElementById("train-label").value;
   const duration = Number(document.getElementById("train-duration").value);
@@ -210,6 +274,8 @@ recordBtn.addEventListener("click", async () => {
     recordBtn.disabled = false;
     return;
   }
+
+  startRecordLevelsPolling();
 
   // The response above only arrives once arecord has actually started, but
   // network/JS/reaction-time slack could still eat into the capture window,
@@ -244,6 +310,7 @@ recordBtn.addEventListener("click", async () => {
     trainStatus.textContent = `Error: ${e.message}`;
   } finally {
     recordBtn.disabled = false;
+    stopRecordLevelsPolling();
   }
 });
 
