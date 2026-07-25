@@ -1236,6 +1236,99 @@ document.querySelectorAll(".collapse-toggle").forEach((btn) => {
   });
 });
 
+// --- Draggable card reordering ---
+// Same localStorage-persistence pattern as collapsed state above, but for
+// the order of the top-level card/pair/group blocks themselves. Only the
+// small grip handle in each header is draggable (not the whole card), so
+// dragging never fights with clicking buttons or moving sliders inside it.
+
+const CARD_ORDER_KEY = "dashboard-card-order";
+const wrapEl = document.querySelector(".wrap");
+
+function getOrderedCards() {
+  return Array.from(wrapEl.querySelectorAll(":scope > [data-order-id]"));
+}
+
+function saveCardOrder() {
+  const order = getOrderedCards().map((el) => el.dataset.orderId);
+  localStorage.setItem(CARD_ORDER_KEY, JSON.stringify(order));
+}
+
+function applySavedCardOrder() {
+  let saved;
+  try {
+    saved = JSON.parse(localStorage.getItem(CARD_ORDER_KEY) || "null");
+  } catch (e) {
+    saved = null;
+  }
+  if (!Array.isArray(saved)) return;
+  const byId = new Map(getOrderedCards().map((el) => [el.dataset.orderId, el]));
+  for (const id of saved) {
+    const el = byId.get(id);
+    if (el) {
+      wrapEl.appendChild(el);
+      byId.delete(id);
+    }
+  }
+  // Anything not in the saved order (e.g. a card added in a later update
+  // that pre-dates this browser's saved order) keeps its natural position,
+  // appended after the ones we do know about.
+  for (const el of byId.values()) {
+    wrapEl.appendChild(el);
+  }
+}
+
+applySavedCardOrder();
+
+let draggedCard = null;
+
+document.querySelectorAll(".drag-handle").forEach((handle) => {
+  handle.addEventListener("dragstart", (e) => {
+    draggedCard = handle.closest("[data-order-id]");
+    if (!draggedCard) return;
+    draggedCard.classList.add("dragging");
+    e.dataTransfer.effectAllowed = "move";
+    // Firefox refuses to start a drag at all without data set here.
+    e.dataTransfer.setData("text/plain", draggedCard.dataset.orderId);
+  });
+  handle.addEventListener("dragend", () => {
+    if (draggedCard) draggedCard.classList.remove("dragging");
+    document.querySelectorAll(".drag-over").forEach((el) => el.classList.remove("drag-over"));
+    draggedCard = null;
+  });
+});
+
+getOrderedCards().forEach((card) => {
+  card.addEventListener("dragover", (e) => {
+    if (!draggedCard || draggedCard === card) return;
+    e.preventDefault();
+    card.classList.add("drag-over");
+  });
+  card.addEventListener("dragleave", () => {
+    card.classList.remove("drag-over");
+  });
+  card.addEventListener("drop", (e) => {
+    if (!draggedCard || draggedCard === card) return;
+    e.preventDefault();
+    card.classList.remove("drag-over");
+    wrapEl.insertBefore(draggedCard, card);
+    saveCardOrder();
+  });
+});
+
+wrapEl.addEventListener("dragover", (e) => {
+  if (draggedCard) e.preventDefault();
+});
+wrapEl.addEventListener("drop", (e) => {
+  // Dropped on the empty space below the last card, rather than on any
+  // specific card -- send it to the end instead of ignoring the drop.
+  if (draggedCard && e.target === wrapEl) {
+    e.preventDefault();
+    wrapEl.appendChild(draggedCard);
+    saveCardOrder();
+  }
+});
+
 pollState();
 pollSystem();
 pollSonos();

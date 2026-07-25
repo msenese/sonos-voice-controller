@@ -1,4 +1,5 @@
 <title>Sonos Voice Controller</title>
+<link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 
 <div class="wrap">
@@ -15,18 +16,18 @@
     </div>
   </header>
 
-  <div class="card" data-collapse-id="live-scores">
-    <h2><span class="card-title">Live Scores</span><button class="collapse-toggle" aria-label="Collapse section"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button></h2>
+  <div class="card" data-collapse-id="live-scores" data-order-id="live-scores">
+    <h2><span class="card-title"><span class="drag-handle" draggable="true" title="Drag to reorder"><svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><circle cx="9" cy="6" r="1.4"/><circle cx="15" cy="6" r="1.4"/><circle cx="9" cy="12" r="1.4"/><circle cx="15" cy="12" r="1.4"/><circle cx="9" cy="18" r="1.4"/><circle cx="15" cy="18" r="1.4"/></svg></span>Live Scores</span><button class="collapse-toggle" aria-label="Collapse section"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button></h2>
     <div id="meters"></div>
   </div>
 
-  <div class="grid-2">
+  <div class="grid-2" data-order-id="system-status">
     <div class="card">
-      <h2>Last Detected</h2>
+      <h2><span class="card-title"><span class="drag-handle" draggable="true" title="Drag to reorder"><svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><circle cx="9" cy="6" r="1.4"/><circle cx="15" cy="6" r="1.4"/><circle cx="9" cy="12" r="1.4"/><circle cx="15" cy="12" r="1.4"/><circle cx="9" cy="18" r="1.4"/><circle cx="15" cy="18" r="1.4"/></svg></span>Last Detected</span></h2>
       <div id="last-detected" class="empty">No detections yet</div>
     </div>
     <div class="card" data-collapse-id="system-status">
-      <h2><span class="card-title">System Status</span><button class="collapse-toggle" aria-label="Collapse section"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button></h2>
+      <h2><span class="card-title"><span class="drag-handle" draggable="true" title="Drag to reorder"><svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><circle cx="9" cy="6" r="1.4"/><circle cx="15" cy="6" r="1.4"/><circle cx="9" cy="12" r="1.4"/><circle cx="15" cy="12" r="1.4"/><circle cx="9" cy="18" r="1.4"/><circle cx="15" cy="18" r="1.4"/></svg></span>System Status</span><button class="collapse-toggle" aria-label="Collapse section"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button></h2>
       <div class="stat-tiles">
         <div class="stat-tile">
           <div class="stat-value" id="stat-uptime">&mdash;</div>
@@ -48,16 +49,16 @@
     </div>
   </div>
 
-  <div class="card" data-collapse-id="detection-history">
-    <h2><span class="card-title">Detection History</span><button class="collapse-toggle" aria-label="Collapse section"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button></h2>
+  <div class="card" data-collapse-id="detection-history" data-order-id="detection-history">
+    <h2><span class="card-title"><span class="drag-handle" draggable="true" title="Drag to reorder"><svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><circle cx="9" cy="6" r="1.4"/><circle cx="15" cy="6" r="1.4"/><circle cx="9" cy="12" r="1.4"/><circle cx="15" cy="12" r="1.4"/><circle cx="9" cy="18" r="1.4"/><circle cx="15" cy="18" r="1.4"/></svg></span>Detection History</span><button class="collapse-toggle" aria-label="Collapse section"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button></h2>
     <ul class="history-list" id="history-list">
       <li class="empty">No detections yet</li>
     </ul>
   </div>
 
-  <div class="grid-2 collapsible-pair" data-collapse-id="mic-capture-level">
+  <div class="grid-2 collapsible-pair" data-collapse-id="mic-capture-level" data-order-id="mic-capture-level">
     <div class="card">
-      <h2>Thresholds</h2>
+      <h2><span class="card-title"><span class="drag-handle" draggable="true" title="Drag to reorder"><svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><circle cx="9" cy="6" r="1.4"/><circle cx="15" cy="6" r="1.4"/><circle cx="9" cy="12" r="1.4"/><circle cx="15" cy="12" r="1.4"/><circle cx="9" cy="18" r="1.4"/><circle cx="15" cy="18" r="1.4"/></svg></span>Thresholds</span></h2>
       <div class="field">
         <div class="field-head"><span><label><input type="checkbox" id="sonos_pause_enabled" checked style="margin-right:6px; vertical-align:middle;">Sonos Pause threshold</label></span><span class="value" id="threshold-value">&mdash;</span></div>
         <input type="range" id="threshold" min="0" max="1" step="0.01">
@@ -81,7 +82,7 @@
     </div>
 
     <div class="card">
-      <h2><span class="card-title">Mic Capture Level</span><button class="collapse-toggle" aria-label="Collapse section"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button></h2>
+      <h2><span class="card-title"><span class="drag-handle" draggable="true" title="Drag to reorder"><svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><circle cx="9" cy="6" r="1.4"/><circle cx="15" cy="6" r="1.4"/><circle cx="9" cy="12" r="1.4"/><circle cx="15" cy="12" r="1.4"/><circle cx="9" cy="18" r="1.4"/><circle cx="15" cy="18" r="1.4"/></svg></span>Mic Capture Level</span><button class="collapse-toggle" aria-label="Collapse section"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button></h2>
       <div class="field">
         <div class="field-head"><span>Capture (0-63)</span><span class="value" id="mic-level-value">50</span></div>
         <input type="range" id="mic-level" min="0" max="63" step="1" value="50">
@@ -90,9 +91,9 @@
     </div>
   </div>
 
-  <div class="card" data-collapse-id="audio-capture-mode">
+  <div class="card" data-collapse-id="audio-capture-mode" data-order-id="audio-capture-mode">
     <h2>
-      <span class="card-title">Audio Capture Mode
+      <span class="card-title"><span class="drag-handle" draggable="true" title="Drag to reorder"><svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><circle cx="9" cy="6" r="1.4"/><circle cx="15" cy="6" r="1.4"/><circle cx="9" cy="12" r="1.4"/><circle cx="15" cy="12" r="1.4"/><circle cx="9" cy="18" r="1.4"/><circle cx="15" cy="18" r="1.4"/></svg></span>Audio Capture Mode
         <span class="info-icon" tabindex="0" data-tooltip="Audio Capture OFF: Direct microphone processing, fastest detection results.&#10;&#10;Audio Capture ON: Recordings of each detection are saved below so you can review and label them into the dataset, which improves future models. Slower for detection processing.">?</span>
       </span>
       <button class="collapse-toggle" aria-label="Collapse section"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button>
@@ -106,8 +107,8 @@
     <div class="status-line" id="audio-mode-status">Loading current mode...</div>
   </div>
 
-  <div class="card" id="captures-card" data-collapse-id="recordings-to-review" style="display:none;">
-    <h2><span class="card-title">Recordings to Review</span><button class="collapse-toggle" aria-label="Collapse section"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button></h2>
+  <div class="card" id="captures-card" data-collapse-id="recordings-to-review" data-order-id="recordings-to-review" style="display:none;">
+    <h2><span class="card-title"><span class="drag-handle" draggable="true" title="Drag to reorder"><svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><circle cx="9" cy="6" r="1.4"/><circle cx="15" cy="6" r="1.4"/><circle cx="9" cy="12" r="1.4"/><circle cx="15" cy="12" r="1.4"/><circle cx="9" cy="18" r="1.4"/><circle cx="15" cy="18" r="1.4"/></svg></span>Recordings to Review</span><button class="collapse-toggle" aria-label="Collapse section"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button></h2>
     <div class="status-line" id="captures-status">Loading...</div>
     <ul class="history-list" id="captures-list">
       <li class="empty">No captures yet</li>
@@ -115,8 +116,8 @@
     <audio id="capture-audio" style="display:none;"></audio>
   </div>
 
-  <div class="workflow-group" data-collapse-id="model-training">
-    <div class="workflow-group-label"><span class="card-title">Model Training</span><button class="collapse-toggle" aria-label="Collapse section"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button></div>
+  <div class="workflow-group" data-collapse-id="model-training" data-order-id="model-training">
+    <div class="workflow-group-label"><span class="card-title"><span class="drag-handle" draggable="true" title="Drag to reorder"><svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><circle cx="9" cy="6" r="1.4"/><circle cx="15" cy="6" r="1.4"/><circle cx="9" cy="12" r="1.4"/><circle cx="15" cy="12" r="1.4"/><circle cx="9" cy="18" r="1.4"/><circle cx="15" cy="18" r="1.4"/></svg></span>Model Training</span><button class="collapse-toggle" aria-label="Collapse section"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button></div>
 
     <div class="card">
       <h2>Training Mode</h2>

@@ -211,6 +211,22 @@ h1 {
 
 .collapse-toggle:hover { color: var(--text-primary); }
 
+.drag-handle {
+  display: inline-flex;
+  vertical-align: middle;
+  margin-right: 6px;
+  color: var(--muted);
+  cursor: grab;
+}
+
+.drag-handle:hover { color: var(--text-primary); }
+.drag-handle:active { cursor: grabbing; }
+
+/* Applied to the top-level card/pair/group being dragged, and to
+   whichever one it's currently hovering over as a drop target. */
+[data-order-id].dragging { opacity: 0.4; }
+[data-order-id].drag-over { outline: 2px dashed var(--accent-violet); outline-offset: 4px; }
+
 .collapse-toggle svg {
   transition: transform 0.15s ease;
 }
