@@ -9,6 +9,10 @@ SONOS_MUTE_THRESHOLD = 0.9
 COOLDOWN = 3.0
 CONSECUTIVE_REQUIRED = 2
 
+SONOS_PAUSE_ENABLED = True
+SONOS_PLAY_ENABLED = True
+SONOS_MUTE_ENABLED = True
+
 # Only needed for the dashboard's training-mode upload button.
 # Get one from the Edge Impulse project: Dashboard > Keys > Add API key.
 EI_API_KEY = "your-edge-impulse-api-key-here"

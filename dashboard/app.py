@@ -65,6 +65,9 @@ CONFIG_FIELDS = {
     "SONOS_MUTE_THRESHOLD": {"type": float, "min": 0.0, "max": 1.0},
     "COOLDOWN": {"type": float, "min": 0.0, "max": 30.0},
     "CONSECUTIVE_REQUIRED": {"type": int, "min": 1, "max": 10},
+    "SONOS_PAUSE_ENABLED": {"type": bool},
+    "SONOS_PLAY_ENABLED": {"type": bool},
+    "SONOS_MUTE_ENABLED": {"type": bool},
 }
 
 app = Flask(__name__)
@@ -176,6 +179,9 @@ def api_state():
         "sonos_mute_threshold": cfg.SONOS_MUTE_THRESHOLD,
         "cooldown": cfg.COOLDOWN,
         "consecutive_required": cfg.CONSECUTIVE_REQUIRED,
+        "sonos_pause_enabled": cfg.SONOS_PAUSE_ENABLED,
+        "sonos_play_enabled": cfg.SONOS_PLAY_ENABLED,
+        "sonos_mute_enabled": cfg.SONOS_MUTE_ENABLED,
     }
     return jsonify(state)
 
@@ -187,6 +193,9 @@ def api_config():
     for key, spec in CONFIG_FIELDS.items():
         json_key = key.lower()
         if json_key not in body:
+            continue
+        if spec["type"] is bool:
+            updates[key] = bool(body[json_key])
             continue
         try:
             value = spec["type"](body[json_key])
@@ -212,6 +221,9 @@ def api_config():
         "sonos_mute_threshold": cfg.SONOS_MUTE_THRESHOLD,
         "cooldown": cfg.COOLDOWN,
         "consecutive_required": cfg.CONSECUTIVE_REQUIRED,
+        "sonos_pause_enabled": cfg.SONOS_PAUSE_ENABLED,
+        "sonos_play_enabled": cfg.SONOS_PLAY_ENABLED,
+        "sonos_mute_enabled": cfg.SONOS_MUTE_ENABLED,
     })
 
 
@@ -1096,12 +1108,14 @@ def _switch_audio_mode_raw(mode):
     else:
         _run_sudo("systemctl", "stop", "audio-buffer.service")
         _run_sudo("systemctl", "disable", "audio-buffer.service")
-        # Auto-Resume Playback's toggle only exists in the UI while Capture Mode
-        # is On -- don't leave it silently enabled with no visible way to turn
-        # it off once we're switching Off.
-        global _auto_resume_enabled
+        # Auto-Resume Playback's and Keep Unmuted's toggles only exist in the
+        # UI while Capture Mode is On -- don't leave either silently enabled
+        # with no visible way to turn it off once we're switching Off.
+        global _auto_resume_enabled, _keep_unmuted_enabled
         with _auto_resume_lock:
             _auto_resume_enabled = False
+        with _keep_unmuted_lock:
+            _keep_unmuted_enabled = False
 
     EI_RUNNER_PENDING_PATH.write_text(_build_ei_runner_unit(mode))
     _run_sudo("cp", str(EI_RUNNER_PENDING_PATH), str(EI_RUNNER_SERVICE_PATH))
@@ -1275,8 +1289,46 @@ def api_sonos_auto_resume_post():
     return jsonify({"enabled": _auto_resume_enabled})
 
 
+# "Keep Unmuted": same pattern as Auto-Resume Playback, for testing sessions
+# where an accidental or voice-triggered mute shouldn't linger. Off by
+# default and only exposed in the UI while Capture Mode is On (see
+# _switch_audio_mode_raw, which force-disables both toggles together).
+_keep_unmuted_enabled = False
+_keep_unmuted_lock = threading.Lock()
+
+
+def _keep_unmuted_loop():
+    while True:
+        time.sleep(1)
+        with _keep_unmuted_lock:
+            enabled = _keep_unmuted_enabled
+        if not enabled:
+            continue
+        try:
+            r = requests.get(f"{cfg.HA_URL}/api/states/{cfg.SONOS_ENTITY}", headers=ha_headers(), timeout=5)
+            if r.status_code < 300 and r.json().get("attributes", {}).get("is_volume_muted"):
+                ha_call_service("media_player", "volume_mute", {"entity_id": cfg.SONOS_ENTITY, "is_volume_muted": False})
+        except requests.RequestException:
+            pass
+
+
+@app.route("/api/sonos/keep-unmuted")
+def api_sonos_keep_unmuted_get():
+    return jsonify({"enabled": _keep_unmuted_enabled})
+
+
+@app.route("/api/sonos/keep-unmuted", methods=["POST"])
+def api_sonos_keep_unmuted_post():
+    global _keep_unmuted_enabled
+    body = request.get_json(silent=True) or {}
+    with _keep_unmuted_lock:
+        _keep_unmuted_enabled = bool(body.get("enabled"))
+    return jsonify({"enabled": _keep_unmuted_enabled})
+
+
 if __name__ == "__main__":
     threading.Thread(target=_auto_resume_loop, daemon=True).start()
+    threading.Thread(target=_keep_unmuted_loop, daemon=True).start()
     # threaded=True: the dev server is otherwise single-threaded, and the
     # SSE stream endpoint holds its request open for the whole recording --
     # without this every other request (including /finish, which is what

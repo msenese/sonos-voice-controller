@@ -154,6 +154,29 @@ async def chase(color=BOOT_COLOR):
 
 
 HA_REQUEST_TIMEOUT = 5
+HA_MAX_RETRIES = 2
+HA_RETRY_DELAY = 1
+
+
+def _ha_request(method, url, **kwargs):
+    # A brief HA hiccup (restart, network blip) used to either hang the whole
+    # controller -- these calls were made synchronously from inside asyncio
+    # coroutines, so a slow/stuck request froze breathe()'s LEDs, GPIO button
+    # polling, and ei-runner message handling all at once, since everything
+    # shares one event loop thread -- or silently drop the command with no
+    # retry. Callers now run this via asyncio.to_thread so it can't block the
+    # loop, and it retries transient connection/timeout errors itself so a
+    # short blip doesn't just lose the command.
+    kwargs.setdefault("timeout", HA_REQUEST_TIMEOUT)
+    last_exc = None
+    for attempt in range(HA_MAX_RETRIES + 1):
+        try:
+            return requests.request(method, url, **kwargs)
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            last_exc = e
+            if attempt < HA_MAX_RETRIES:
+                time.sleep(HA_RETRY_DELAY)
+    raise last_exc
 
 
 def post_capture(label, score):
@@ -182,13 +205,12 @@ def toggle_mute():
         "Authorization": f"Bearer {cfg.HA_TOKEN}",
         "Content-Type": "application/json"
     }
-    response = requests.get(f"{cfg.HA_URL}/api/states/{cfg.SONOS_ENTITY}", headers=headers, timeout=HA_REQUEST_TIMEOUT)
+    response = _ha_request("GET", f"{cfg.HA_URL}/api/states/{cfg.SONOS_ENTITY}", headers=headers)
     state = response.json()
     is_muted_current = state.get("attributes", {}).get("is_volume_muted", False)
-    requests.post(f"{cfg.HA_URL}/api/services/media_player/volume_mute",
+    _ha_request("POST", f"{cfg.HA_URL}/api/services/media_player/volume_mute",
         headers=headers,
-        json={"entity_id": cfg.SONOS_ENTITY, "is_volume_muted": not is_muted_current},
-        timeout=HA_REQUEST_TIMEOUT)
+        json={"entity_id": cfg.SONOS_ENTITY, "is_volume_muted": not is_muted_current})
     is_muted = not is_muted_current
     write_state()
 
@@ -212,11 +234,10 @@ def trigger_ha(action):
     if endpoint is None:
         return
     try:
-        response = requests.post(
-            f"{cfg.HA_URL}/api/services/media_player/{endpoint}",
+        response = _ha_request(
+            "POST", f"{cfg.HA_URL}/api/services/media_player/{endpoint}",
             headers=headers,
             json={"entity_id": cfg.SONOS_ENTITY},
-            timeout=HA_REQUEST_TIMEOUT,
         )
         if response.status_code >= 300:
             print(f"[HA] {endpoint} failed: HTTP {response.status_code} {response.text[:200]}")
@@ -239,7 +260,7 @@ async def watch_button():
             current_state = GPIO.input(BUTTON_PIN)
             if last_state == GPIO.HIGH and current_state == GPIO.LOW:
                 print("[BTN] Button pressed - toggling mute")
-                toggle_mute()
+                await asyncio.to_thread(toggle_mute)
                 await flash_green()
             last_state = current_state
         except Exception as e:
@@ -247,21 +268,26 @@ async def watch_button():
         await asyncio.sleep(0.05)
 
 
+def _fetch_player_state():
+    headers = {
+        "Authorization": f"Bearer {cfg.HA_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    response = _ha_request("GET", f"{cfg.HA_URL}/api/states/{cfg.SONOS_ENTITY}", headers=headers)
+    state = response.json()
+    attributes = state.get("attributes", {})
+    volume_muted = attributes.get("is_volume_muted", False)
+    volume_level = attributes.get("volume_level", 1.0)
+    muted = bool(volume_muted) or volume_level <= 0.02
+    paused = state.get("state") == "paused"
+    return muted, paused
+
+
 async def poll_player_state():
     global is_muted, is_paused
     while True:
         try:
-            headers = {
-                "Authorization": f"Bearer {cfg.HA_TOKEN}",
-                "Content-Type": "application/json"
-            }
-            response = requests.get(f"{cfg.HA_URL}/api/states/{cfg.SONOS_ENTITY}", headers=headers, timeout=HA_REQUEST_TIMEOUT)
-            state = response.json()
-            attributes = state.get("attributes", {})
-            volume_muted = attributes.get("is_volume_muted", False)
-            volume_level = attributes.get("volume_level", 1.0)
-            is_muted = bool(volume_muted) or volume_level <= 0.02
-            is_paused = state.get("state") == "paused"
+            is_muted, is_paused = await asyncio.to_thread(_fetch_player_state)
             write_state()
         except Exception as e:
             print(f"[HA] Poll error: {e}")
@@ -292,6 +318,18 @@ async def listen():
                     now = time.time()
                     for label, score in result.items():
                         if label in ["sonos pause", "sonos play", "sonos mute"]:
+                            enabled = (
+                                cfg.SONOS_PLAY_ENABLED if label == "sonos play"
+                                else cfg.SONOS_MUTE_ENABLED if label == "sonos mute"
+                                else cfg.SONOS_PAUSE_ENABLED
+                            )
+                            if not enabled:
+                                # Gate before any threshold/consecutive/cooldown
+                                # logic runs at all -- a disabled label should
+                                # never trigger regardless of score, not just
+                                # be made harder to trigger.
+                                consecutive_count[label] = 0
+                                continue
                             threshold = (
                                 cfg.SONOS_PLAY_THRESHOLD if label == "sonos play"
                                 else cfg.SONOS_MUTE_THRESHOLD if label == "sonos mute"
@@ -309,8 +347,8 @@ async def listen():
                                             "score": score,
                                             "timestamp": now,
                                         })
-                                        trigger_ha(label)
-                                        post_capture(label, score)
+                                        await asyncio.to_thread(trigger_ha, label)
+                                        await asyncio.to_thread(post_capture, label, score)
                                         await flash_green()
                             else:
                                 consecutive_count[label] = 0

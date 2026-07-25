@@ -60,6 +60,34 @@ for (const [key, el] of Object.entries(sliders)) {
   });
 }
 
+// Per-label enable/disable -- when off, the corresponding threshold slider
+// is disabled too (it has no effect while sonos-controller.py's detection
+// loop skips that label entirely), and greying it out makes that visible
+// instead of leaving a slider that looks live but silently does nothing.
+const ENABLED_TO_SLIDER = {
+  sonos_pause_enabled: sliders.threshold,
+  sonos_play_enabled: sliders.sonos_play_threshold,
+  sonos_mute_enabled: sliders.sonos_mute_threshold,
+};
+const enabledToggles = {
+  sonos_pause_enabled: document.getElementById("sonos_pause_enabled"),
+  sonos_play_enabled: document.getElementById("sonos_play_enabled"),
+  sonos_mute_enabled: document.getElementById("sonos_mute_enabled"),
+};
+
+for (const [key, el] of Object.entries(enabledToggles)) {
+  el.addEventListener("change", async () => {
+    ENABLED_TO_SLIDER[key].disabled = !el.checked;
+    const body = {};
+    body[key] = el.checked;
+    await fetch("/api/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  });
+}
+
 function setBadge(el, textEl, status, text) {
   el.classList.remove("good", "warning", "critical");
   if (status) el.classList.add(status);
@@ -144,6 +172,12 @@ async function pollState() {
     for (const [key, el] of Object.entries(sliders)) {
       el.value = state.config[key];
       document.getElementById(`${key}-value`).textContent = fmt(key, el.value);
+    }
+    for (const [key, el] of Object.entries(enabledToggles)) {
+      if (typeof state.config[key] === "boolean") {
+        el.checked = state.config[key];
+        ENABLED_TO_SLIDER[key].disabled = !el.checked;
+      }
     }
     configInitialized = true;
   }
@@ -982,12 +1016,14 @@ const audioModeClassicBtn = document.getElementById("audio-mode-classic");
 const audioModeBufferBtn = document.getElementById("audio-mode-buffer");
 const capturesCard = document.getElementById("captures-card");
 const autoResumeToggleBtn = document.getElementById("auto-resume-toggle");
+const keepUnmutedToggleBtn = document.getElementById("keep-unmuted-toggle");
 
 function setAudioModeButtons(mode) {
   audioModeClassicBtn.classList.toggle("primary", mode === "classic");
   audioModeBufferBtn.classList.toggle("primary", mode === "buffer");
   capturesCard.style.display = mode === "buffer" ? "" : "none";
   autoResumeToggleBtn.style.display = mode === "buffer" ? "" : "none";
+  keepUnmutedToggleBtn.style.display = mode === "buffer" ? "" : "none";
 }
 
 async function loadAudioMode() {
@@ -1035,10 +1071,11 @@ async function switchAudioMode(mode) {
     audioModeClassicBtn.disabled = false;
     audioModeBufferBtn.disabled = false;
     await loadAudioMode();
-    // The server force-disables Auto-Resume Playback whenever it switches to Off
-    // (including an automatic rollback); refresh the button so it doesn't show a
-    // stale "On" if that just happened.
+    // The server force-disables Auto-Resume Playback and Keep Unmuted whenever
+    // it switches to Off (including an automatic rollback); refresh both
+    // buttons so neither shows a stale "On" if that just happened.
     await loadAutoResume();
+    await loadKeepUnmuted();
   }
 }
 
@@ -1148,6 +1185,42 @@ autoResumeBtn.addEventListener("click", async () => {
   }
 });
 
+// --- Keep Unmuted ---
+
+const keepUnmutedBtn = document.getElementById("keep-unmuted-toggle");
+let keepUnmutedEnabled = false;
+
+function setKeepUnmutedButton(enabled) {
+  keepUnmutedEnabled = enabled;
+  keepUnmutedBtn.textContent = `Keep Unmuted: ${enabled ? "On" : "Off"}`;
+  keepUnmutedBtn.classList.toggle("active", enabled);
+}
+
+async function loadKeepUnmuted() {
+  try {
+    const res = await fetch("/api/sonos/keep-unmuted");
+    const data = await res.json();
+    setKeepUnmutedButton(!!data.enabled);
+  } catch (e) {
+    // Leave the last-known state showing; badges elsewhere surface connectivity issues.
+  }
+}
+
+keepUnmutedBtn.addEventListener("click", async () => {
+  keepUnmutedBtn.disabled = true;
+  try {
+    const res = await fetch("/api/sonos/keep-unmuted", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: !keepUnmutedEnabled }),
+    });
+    const data = await res.json();
+    setKeepUnmutedButton(!!data.enabled);
+  } finally {
+    keepUnmutedBtn.disabled = false;
+  }
+});
+
 // --- Collapsible cards ---
 
 document.querySelectorAll(".collapse-toggle").forEach((btn) => {
@@ -1170,6 +1243,7 @@ loadSampleCounts();
 loadCaptures();
 loadAudioMode();
 loadAutoResume();
+loadKeepUnmuted();
 loadModelStatus();
 setInterval(pollState, 1000);
 setInterval(pollSystem, 5000);
