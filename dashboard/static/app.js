@@ -933,19 +933,25 @@ async function loadCaptures() {
     capturesList.innerHTML = captures.map(c => {
       const { label, score } = parseCaptureFilename(c.filename);
       const pct = Number.isFinite(score) ? `${(score * 100).toFixed(0)}%` : "?";
-      const options = labels.map(l => `<option value="${l}">${l}</option>`).join("");
+      const suggestion = c.suggested_label;
+      const options = labels.map(l => `<option value="${l}" ${l === suggestion ? "selected" : ""}>${l}</option>`).join("");
+      // VAD's guess is just a starting point (music with strong vocals fools
+      // it into "unknown"), so it's shown plainly rather than styled as if
+      // it were a confident classification.
+      const vadNote = suggestion ? ` &middot; VAD: ${suggestion === "unknown" ? "speech detected" : "no speech"}` : "";
       return `
         <li>
           <span class="capture-row">
             <button class="play-btn" data-filename="${c.filename}" title="Play">&#9654;</button>
-            <span>${label} (${pct}) &middot; ${timeAgo(c.mtime)}</span>
+            <span>${label} (${pct}) &middot; ${timeAgo(c.mtime)}${vadNote}</span>
           </span>
           <span class="capture-actions">
             <button class="correct" data-filename="${c.filename}" title="Detected label is correct &mdash; upload as ${label}">&check; Correct</button>
             <select class="relabel-select" data-filename="${c.filename}">
-              <option value="" selected disabled>Relabel as&hellip;</option>
+              <option value="" ${suggestion ? "" : "selected"} disabled>Relabel as&hellip;</option>
               ${options}
             </select>
+            <button class="use-suggestion" data-filename="${c.filename}" title="Submit the label currently selected above" ${suggestion ? "" : "disabled"}>Use</button>
             <button class="discard" data-filename="${c.filename}" title="Not usable for training &mdash; delete without uploading">&cross; Discard</button>
           </span>
         </li>
@@ -988,6 +994,21 @@ capturesList.addEventListener("click", (e) => {
 
   if (btn.classList.contains("correct")) {
     submitCaptureAction(btn, filename, `/api/captures/${encodeURIComponent(filename)}/confirm`, { method: "POST" });
+    return;
+  }
+
+  if (btn.classList.contains("use-suggestion")) {
+    // Submits whatever's currently selected in the dropdown -- pre-filled
+    // with VAD's guess by default, but this also works after a manual
+    // override since it just reads the select's live value.
+    const select = btn.closest("li").querySelector(".relabel-select");
+    const label = select ? select.value : "";
+    if (!label) return;
+    submitCaptureAction(btn, filename, `/api/captures/${encodeURIComponent(filename)}/relabel`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ label }),
+    });
     return;
   }
 

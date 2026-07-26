@@ -58,7 +58,7 @@ def find_output_device_index(name_substring, device_index):
 
 
 CAPTURE_DIR = Path("/home/msenese/trigger-captures")
-MAX_CAPTURES = 50
+MAX_CAPTURES = 200
 
 _buffer = np.zeros(BUFFER_SAMPLES, dtype=np.int16)
 _write_pos = 0

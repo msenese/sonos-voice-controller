@@ -14,6 +14,7 @@ from datetime import date
 from pathlib import Path
 
 import requests
+import webrtcvad
 from flask import Flask, Response, jsonify, render_template, request, send_from_directory
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -554,6 +555,53 @@ def parse_capture_filename(filename):
     return " ".join(rest[:-1])  # drop the trailing score
 
 
+VAD_FRAME_MS = 30
+VAD_SPEECH_RATIO_THRESHOLD = 0.1
+
+# Keyed by filename rather than recomputed on every poll -- captures are
+# immutable once written, and the dashboard polls /api/captures every 5s,
+# so re-running VAD over the same (possibly 200-deep) queue on each poll
+# would be wasted CPU on a Pi Zero W2. Pruned in api_captures() to only
+# currently-listed filenames, so it can't grow past MAX_CAPTURES entries.
+_vad_suggestion_cache = {}
+_vad_cache_lock = threading.Lock()
+
+
+def _vad_suggest_label(path):
+    # A starting-point default for the relabel dropdown, not a real
+    # classifier -- speech-like activity anywhere in the clip suggests
+    # "unknown" (a real utterance, right command or not), no speech
+    # suggests "noise". Known to get music with strong vocals wrong,
+    # hence still leaving the dropdown fully overridable.
+    vad = webrtcvad.Vad(2)
+    with wave.open(str(path), "rb") as wf:
+        if (wf.getframerate(), wf.getsampwidth(), wf.getnchannels()) != (16000, 2, 1):
+            return None
+        raw = wf.readframes(wf.getnframes())
+    frame_bytes = int(16000 * VAD_FRAME_MS / 1000) * 2  # 16-bit samples
+    total = speech = 0
+    for i in range(0, len(raw) - frame_bytes + 1, frame_bytes):
+        total += 1
+        if vad.is_speech(raw[i:i + frame_bytes], 16000):
+            speech += 1
+    if total == 0:
+        return None
+    return "unknown" if (speech / total) > VAD_SPEECH_RATIO_THRESHOLD else "noise"
+
+
+def _get_vad_suggestion(filename):
+    with _vad_cache_lock:
+        if filename in _vad_suggestion_cache:
+            return _vad_suggestion_cache[filename]
+    try:
+        suggestion = _vad_suggest_label(CAPTURE_DIR / filename)
+    except (OSError, wave.Error):
+        suggestion = None
+    with _vad_cache_lock:
+        _vad_suggestion_cache[filename] = suggestion
+    return suggestion
+
+
 @app.route("/api/captures")
 def api_captures():
     try:
@@ -562,7 +610,18 @@ def api_captures():
         return jsonify({"error": f"could not reach audio-buffer service: {e}"}), 502
     if r.status_code >= 300:
         return jsonify({"error": f"audio-buffer service error: {r.status_code} {r.text}"}), 502
-    return jsonify(r.json())
+
+    data = r.json()
+    captures = data.get("captures", [])
+    for c in captures:
+        c["suggested_label"] = _get_vad_suggestion(c["filename"])
+
+    current_filenames = {c["filename"] for c in captures}
+    with _vad_cache_lock:
+        for stale in set(_vad_suggestion_cache) - current_filenames:
+            del _vad_suggestion_cache[stale]
+
+    return jsonify({"captures": captures})
 
 
 @app.route("/api/captures/<path:filename>", methods=["DELETE"])
