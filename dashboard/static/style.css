@@ -466,6 +466,12 @@ button.primary {
 button.correct { border-color: var(--status-good); color: var(--status-good); }
 button.discard { border-color: var(--status-critical); color: var(--status-critical); }
 
+button.play-btn.playing {
+  background: var(--series-1);
+  border-color: var(--series-1);
+  color: #fff;
+}
+
 button.danger {
   border-color: var(--status-critical);
   background: var(--status-critical);

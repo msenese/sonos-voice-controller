@@ -912,10 +912,27 @@ function parseCaptureFilename(filename) {
   return { label, score: Number(score) };
 }
 
-function playCapture(filename) {
+let currentlyPlayingBtn = null;
+
+function playCapture(filename, btn) {
+  if (currentlyPlayingBtn) {
+    currentlyPlayingBtn.classList.remove("playing");
+  }
   captureAudio.src = `/trigger-captures/${filename}`;
   captureAudio.play();
+  currentlyPlayingBtn = btn;
+  btn.classList.add("playing");
 }
+
+// "pause" covers both natural end-of-playback and any manual/early stop --
+// the audio element always fires it when playback stops for any reason, so
+// a single listener here is enough to always clear the highlight.
+captureAudio.addEventListener("pause", () => {
+  if (currentlyPlayingBtn) {
+    currentlyPlayingBtn.classList.remove("playing");
+    currentlyPlayingBtn = null;
+  }
+});
 
 async function loadCaptures() {
   try {
@@ -988,7 +1005,7 @@ capturesList.addEventListener("click", (e) => {
   if (!filename) return;
 
   if (btn.classList.contains("play-btn")) {
-    playCapture(filename);
+    playCapture(filename, btn);
     return;
   }
 
@@ -1028,6 +1045,49 @@ capturesList.addEventListener("change", (e) => {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ label }),
   });
+});
+
+const saveAllSuggestionsBtn = document.getElementById("save-all-suggestions-btn");
+
+saveAllSuggestionsBtn.addEventListener("click", async () => {
+  // Snapshot now -- loadCaptures() replaces capturesList's innerHTML once
+  // this finishes, so the row list would otherwise go stale mid-loop.
+  const rows = Array.from(capturesList.querySelectorAll("li")).filter(li => {
+    const select = li.querySelector(".relabel-select");
+    return select && select.value;
+  });
+  if (rows.length === 0) {
+    capturesStatus.textContent = "No suggested labels to save.";
+    return;
+  }
+  const ok = confirm(`Save ${rows.length} suggested label(s)? This uploads each to Edge Impulse and removes the local capture.`);
+  if (!ok) return;
+
+  saveAllSuggestionsBtn.disabled = true;
+  let done = 0;
+  for (const li of rows) {
+    const select = li.querySelector(".relabel-select");
+    const filename = select.dataset.filename;
+    const label = select.value;
+    disableCaptureRow(select, true);
+    try {
+      const res = await fetch(`/api/captures/${encodeURIComponent(filename)}/relabel`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ label }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      done++;
+      capturesStatus.textContent = `Saving suggestions... ${done}/${rows.length}`;
+    } catch (e) {
+      capturesStatus.textContent = `Stopped after ${done}/${rows.length}: ${e.message}`;
+      disableCaptureRow(select, false);
+      break;
+    }
+  }
+  saveAllSuggestionsBtn.disabled = false;
+  await loadCaptures();
 });
 
 // --- Audio pipeline mode (Classic / Buffer) ---
