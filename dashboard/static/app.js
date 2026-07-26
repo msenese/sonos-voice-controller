@@ -913,6 +913,7 @@ function parseCaptureFilename(filename) {
 }
 
 let currentlyPlayingBtn = null;
+let lastPlayedFilename = null;
 
 function playCapture(filename, btn) {
   if (currentlyPlayingBtn) {
@@ -922,6 +923,17 @@ function playCapture(filename, btn) {
   captureAudio.play();
   currentlyPlayingBtn = btn;
   btn.classList.add("playing");
+
+  // Tracked by filename rather than a direct DOM reference, since
+  // loadCaptures() replaces the list's DOM on its 5s poll -- applied
+  // immediately here for instant feedback, and reapplied by filename in
+  // loadCaptures()'s render so it survives that replacement. Separate from
+  // the button's transient "playing" state: this stays on the row (grey)
+  // even after playback ends, until a different one is played.
+  document.querySelectorAll("#captures-list li.last-played").forEach(li => li.classList.remove("last-played"));
+  lastPlayedFilename = filename;
+  const row = btn.closest("li");
+  if (row) row.classList.add("last-played");
 }
 
 // "pause" covers both natural end-of-playback and any manual/early stop --
@@ -943,6 +955,7 @@ async function loadCaptures() {
     if (captures.length === 0) {
       capturesList.innerHTML = `<li class="empty">No captures yet</li>`;
       capturesStatus.textContent = "Captures are saved automatically whenever a command triggers.";
+      saveAllSuggestionsBtn.style.display = "none";
       return;
     }
     capturesStatus.textContent = `${captures.length} capture(s), most recent first.`;
@@ -957,7 +970,7 @@ async function loadCaptures() {
       // it were a confident classification.
       const vadNote = suggestion ? ` &middot; VAD: ${suggestion === "unknown" ? "speech detected" : "no speech"}` : "";
       return `
-        <li>
+        <li class="${c.filename === lastPlayedFilename ? "last-played" : ""}">
           <span class="capture-row">
             <button class="play-btn" data-filename="${c.filename}" title="Play">&#9654;</button>
             <span>${label} (${pct}) &middot; ${timeAgo(c.mtime)}${vadNote}</span>
@@ -974,10 +987,23 @@ async function loadCaptures() {
         </li>
       `;
     }).join("");
+    updateSaveAllVisibility();
   } catch (e) {
     capturesStatus.textContent = `Could not load captures: ${e.message}`;
   }
 }
+
+// The button only appears once you've scrolled to the bottom of the
+// (independently scrollable, max-height-capped) list -- otherwise it'd be
+// too easy to bulk-save before actually scrolling through and listening to
+// everything above the fold.
+function updateSaveAllVisibility() {
+  const threshold = 4; // tolerance for sub-pixel scroll math
+  const atBottom = capturesList.scrollTop + capturesList.clientHeight >= capturesList.scrollHeight - threshold;
+  saveAllSuggestionsBtn.style.display = atBottom ? "" : "none";
+}
+
+capturesList.addEventListener("scroll", updateSaveAllVisibility);
 
 function disableCaptureRow(el, disabled) {
   const row = el.closest("li");

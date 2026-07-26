@@ -472,6 +472,10 @@ button.play-btn.playing {
   color: #fff;
 }
 
+.history-list li.last-played {
+  background: var(--gridline);
+}
+
 button.danger {
   border-color: var(--status-critical);
   background: var(--status-critical);
