@@ -1210,6 +1210,8 @@ def api_sonos_state():
         "state": data.get("state"),
         "volume_level": attrs.get("volume_level"),
         "is_volume_muted": bool(attrs.get("is_volume_muted", False)),
+        "media_title": attrs.get("media_title"),
+        "media_artist": attrs.get("media_artist"),
     })
 
 

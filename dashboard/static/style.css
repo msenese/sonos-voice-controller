@@ -109,6 +109,19 @@ h1 {
   gap: 6px;
 }
 
+.now-playing {
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
+
+@media (max-width: 640px) {
+  .now-playing { max-width: 120px; }
+}
+
 .transport-btn {
   display: inline-flex;
   align-items: center;

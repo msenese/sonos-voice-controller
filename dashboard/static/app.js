@@ -1095,6 +1095,16 @@ let sonosIsPlaying = false;
 let sonosIsMuted = false;
 let volumeSliderActive = false;
 
+const nowPlayingEl = document.getElementById("now-playing");
+
+function setNowPlaying(title, artist) {
+  if (!title && !artist) {
+    nowPlayingEl.textContent = "—"; // em dash placeholder
+    return;
+  }
+  nowPlayingEl.textContent = title && artist ? `${artist} — ${title}` : (title || artist);
+}
+
 async function pollSonos() {
   try {
     const res = await fetch("/api/sonos/state");
@@ -1107,8 +1117,10 @@ async function pollSonos() {
     if (!volumeSliderActive && typeof data.volume_level === "number") {
       volumeSlider.value = data.volume_level;
     }
+    setNowPlaying(data.media_title, data.media_artist);
   } catch (e) {
     // Stay quiet on transient HA polling errors; the badges already surface connectivity issues.
+    setNowPlaying(null, null);
   }
 }
 
