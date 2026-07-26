@@ -13,8 +13,9 @@ import zipfile
 from datetime import date
 from pathlib import Path
 
+import numpy as np
+import onnxruntime
 import requests
-import webrtcvad
 from flask import Flask, Response, jsonify, render_template, request, send_from_directory
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -555,8 +556,74 @@ def parse_capture_filename(filename):
     return " ".join(rest[:-1])  # drop the trailing score
 
 
-VAD_FRAME_MS = 30
 VAD_SPEECH_RATIO_THRESHOLD = 0.1
+SILERO_CHUNK_SAMPLES = 512  # required chunk size for Silero's 16kHz model
+SILERO_CONTEXT_SAMPLES = 64  # trailing samples carried into the next chunk
+SILERO_SPEECH_PROB_THRESHOLD = 0.5
+SILERO_MODEL_PATH = PROJECT_ROOT / "models" / "silero_vad_16k.onnx"
+
+# webrtcvad (classic signal-processing VAD) was tried first but couldn't
+# reliably tell instrumental music from speech even at its strictest
+# aggressiveness setting -- confirmed by comparing both against a real
+# mixed batch of NPR speech and instrumental-music captures, where it kept
+# misreading music as speech. Silero (a small neural VAD, run here via
+# onnxruntime directly rather than the pip package to avoid pulling in
+# full PyTorch on a Pi Zero W2) separated the same batch cleanly. Session
+# is a module-level singleton (thread-safe for concurrent .run() calls per
+# ONNX Runtime's own docs); the recurrent state/context arrays a single
+# inference streams between chunks are NOT shared -- each call gets its
+# own, so concurrent requests (the dev server runs threaded=True) can't
+# corrupt each other's state.
+_silero_session = None
+_silero_session_lock = threading.Lock()
+
+
+def _get_silero_session():
+    global _silero_session
+    if _silero_session is None:
+        with _silero_session_lock:
+            if _silero_session is None:
+                opts = onnxruntime.SessionOptions()
+                opts.inter_op_num_threads = 1
+                opts.intra_op_num_threads = 1
+                _silero_session = onnxruntime.InferenceSession(
+                    str(SILERO_MODEL_PATH), sess_options=opts, providers=["CPUExecutionProvider"],
+                )
+    return _silero_session
+
+
+def _vad_suggest_label(path):
+    # A starting-point default for the relabel dropdown, not a real
+    # classifier -- speech-like activity anywhere in the clip suggests
+    # "unknown" (a real utterance, right command or not), no speech
+    # suggests "noise". Still leaves the dropdown fully overridable for
+    # whatever cases this gets wrong.
+    with wave.open(str(path), "rb") as wf:
+        if (wf.getframerate(), wf.getsampwidth(), wf.getnchannels()) != (16000, 2, 1):
+            return None
+        raw = wf.readframes(wf.getnframes())
+
+    samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    session = _get_silero_session()
+    state = np.zeros((2, 1, 128), dtype=np.float32)
+    context = np.zeros((1, SILERO_CONTEXT_SAMPLES), dtype=np.float32)
+
+    total = speech = 0
+    for i in range(0, len(samples) - SILERO_CHUNK_SAMPLES + 1, SILERO_CHUNK_SAMPLES):
+        chunk = samples[i:i + SILERO_CHUNK_SAMPLES].reshape(1, -1)
+        x = np.concatenate([context, chunk], axis=1)
+        prob, state = session.run(None, {
+            "input": x, "state": state, "sr": np.array(16000, dtype="int64"),
+        })
+        context = x[:, -SILERO_CONTEXT_SAMPLES:]
+        total += 1
+        if float(prob[0][0]) > SILERO_SPEECH_PROB_THRESHOLD:
+            speech += 1
+
+    if total == 0:
+        return None
+    return "unknown" if (speech / total) > VAD_SPEECH_RATIO_THRESHOLD else "noise"
+
 
 # Keyed by filename rather than recomputed on every poll -- captures are
 # immutable once written, and the dashboard polls /api/captures every 5s,
@@ -565,28 +632,6 @@ VAD_SPEECH_RATIO_THRESHOLD = 0.1
 # currently-listed filenames, so it can't grow past MAX_CAPTURES entries.
 _vad_suggestion_cache = {}
 _vad_cache_lock = threading.Lock()
-
-
-def _vad_suggest_label(path):
-    # A starting-point default for the relabel dropdown, not a real
-    # classifier -- speech-like activity anywhere in the clip suggests
-    # "unknown" (a real utterance, right command or not), no speech
-    # suggests "noise". Known to get music with strong vocals wrong,
-    # hence still leaving the dropdown fully overridable.
-    vad = webrtcvad.Vad(2)
-    with wave.open(str(path), "rb") as wf:
-        if (wf.getframerate(), wf.getsampwidth(), wf.getnchannels()) != (16000, 2, 1):
-            return None
-        raw = wf.readframes(wf.getnframes())
-    frame_bytes = int(16000 * VAD_FRAME_MS / 1000) * 2  # 16-bit samples
-    total = speech = 0
-    for i in range(0, len(raw) - frame_bytes + 1, frame_bytes):
-        total += 1
-        if vad.is_speech(raw[i:i + frame_bytes], 16000):
-            speech += 1
-    if total == 0:
-        return None
-    return "unknown" if (speech / total) > VAD_SPEECH_RATIO_THRESHOLD else "noise"
 
 
 def _get_vad_suggestion(filename):
