@@ -8,6 +8,17 @@
   #review-list li { flex-direction: column; align-items: stretch; gap: 4px; }
   .lc-top-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
   .lc-filename { color: var(--muted); font-size: 12px; padding-left: 22px; }
+
+  /* Rows here are twice as tall as the shared .history-list default (220px)
+     was tuned for, so this page needs its own taller box -- and since
+     screen sizes vary a lot more than the other lists' fixed-height
+     content, letting it be dragged is more useful here than a single
+     fixed number could be. */
+  #review-list {
+    max-height: 480px;
+    resize: vertical;
+    overflow-y: auto;
+  }
 </style>
 
 <div class="wrap">
