@@ -1039,6 +1039,55 @@ def api_low_confidence_relabel(sample_id):
     return jsonify({"ok": True, "label": label})
 
 
+@app.route("/api/low-confidence/disabled")
+def api_low_confidence_disabled_list():
+    # No server-side filter for isDisabled exists (confirmed via probing --
+    # disabled=true/isDisabled=true/category=disabled are all silently
+    # ignored), so this pages through every sample project-wide and filters
+    # client-side. An on-demand action, not something polled continuously.
+    if not ei_configured():
+        return jsonify({"error": "EI_API_KEY / EI_PROJECT_ID not configured in config.py"}), 400
+    disabled = []
+    offset = 0
+    while True:
+        try:
+            r = requests.get(
+                f"{EI_API_BASE}/{cfg.EI_PROJECT_ID}/raw-data",
+                headers=ei_headers(),
+                params={"category": "all", "limit": 100, "offset": offset},
+                timeout=30,
+            )
+            r.raise_for_status()
+        except requests.RequestException as e:
+            return jsonify({"error": str(e)}), 502
+        page = r.json().get("samples", [])
+        disabled.extend(
+            {"id": s["id"], "filename": s["filename"], "label": s["label"], "added": s.get("added")}
+            for s in page if s.get("isDisabled")
+        )
+        if len(page) < 100:
+            break
+        offset += 100
+    disabled.sort(key=lambda s: s.get("added") or "", reverse=True)
+    return jsonify({"disabled": disabled})
+
+
+@app.route("/api/low-confidence/<int:sample_id>/enable", methods=["POST"])
+def api_low_confidence_enable(sample_id):
+    if not ei_admin_configured():
+        return jsonify({"error": "EI_ADMIN_API_KEY not configured in config.py (enable requires an Admin-role key)"}), 400
+    try:
+        r = requests.post(
+            f"{EI_API_BASE}/{cfg.EI_PROJECT_ID}/raw-data/{sample_id}/enable",
+            headers=ei_admin_headers(), json={}, timeout=15,
+        )
+    except requests.RequestException as e:
+        return jsonify({"error": str(e)}), 502
+    if r.status_code >= 300:
+        return jsonify({"error": f"Edge Impulse error {r.status_code}: {r.text[:200]}"}), 502
+    return jsonify({"ok": True})
+
+
 @app.route("/api/low-confidence/<int:sample_id>", methods=["DELETE"])
 def api_low_confidence_delete(sample_id):
     if not ei_admin_configured():

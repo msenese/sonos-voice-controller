@@ -60,6 +60,15 @@
     <ul class="history-list" id="review-list"></ul>
     <audio id="review-audio" style="display:none;"></audio>
   </div>
+
+  <div class="card">
+    <h2>Disabled Samples</h2>
+    <div class="train-row">
+      <button id="refresh-disabled-btn">Refresh</button>
+    </div>
+    <div class="status-line" id="disabled-status">Click Refresh to list every currently-disabled sample project-wide (scans all samples -- no direct filter for this exists on Edge Impulse's API, so it can take a few seconds).</div>
+    <ul class="history-list" id="disabled-list"></ul>
+  </div>
 </div>
 
 <script>window.LABELS = {{ labels | tojson }};</script>
@@ -310,6 +319,63 @@ runBtn.addEventListener("click", async () => {
   }
   if (pollTimer) clearTimeout(pollTimer);
   pollStatus();
+});
+
+// --- Disabled samples (re-enable) ---
+
+const disabledList = document.getElementById("disabled-list");
+const disabledStatus = document.getElementById("disabled-status");
+const refreshDisabledBtn = document.getElementById("refresh-disabled-btn");
+
+function renderDisabled(samples) {
+  if (!samples || samples.length === 0) {
+    disabledList.innerHTML = `<li class="empty">No disabled samples found.</li>`;
+    return;
+  }
+  disabledList.innerHTML = samples.map(s => {
+    const dateNote = s.added ? ` &middot; ${new Date(s.added).toLocaleDateString()}` : "";
+    return `
+      <li>
+        <span>[${s.label}] ${s.filename}${dateNote}</span>
+        <span class="capture-actions">
+          <button class="correct enable-btn" data-id="${s.id}" title="Re-include this sample in training">&check; Enable</button>
+        </span>
+      </li>
+    `;
+  }).join("");
+}
+
+refreshDisabledBtn.addEventListener("click", async () => {
+  refreshDisabledBtn.disabled = true;
+  disabledStatus.textContent = "Scanning all samples...";
+  try {
+    const res = await fetch("/api/low-confidence/disabled");
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    disabledStatus.textContent = `${data.disabled.length} sample(s) currently disabled.`;
+    renderDisabled(data.disabled);
+  } catch (e) {
+    disabledStatus.textContent = `Error: ${e.message}`;
+  } finally {
+    refreshDisabledBtn.disabled = false;
+  }
+});
+
+disabledList.addEventListener("click", async (e) => {
+  const btn = e.target.closest(".enable-btn");
+  if (!btn) return;
+  const id = btn.dataset.id;
+  const row = btn.closest("li");
+  row.querySelectorAll("button").forEach(b => { b.disabled = true; });
+  try {
+    const res = await fetch(`/api/low-confidence/${id}/enable`, { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    row.remove();
+  } catch (e) {
+    disabledStatus.textContent = `Error: ${e.message}`;
+    row.querySelectorAll("button").forEach(b => { b.disabled = false; });
+  }
 });
 
 pollStatus();
