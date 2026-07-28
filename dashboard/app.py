@@ -594,18 +594,11 @@ def _get_silero_session():
     return _silero_session
 
 
-def _vad_suggest_label(path):
-    # A starting-point default for the relabel dropdown, not a real
-    # classifier -- speech-like activity anywhere in the clip suggests
-    # "unknown" (a real utterance, right command or not), no speech
-    # suggests "noise". Still leaves the dropdown fully overridable for
-    # whatever cases this gets wrong.
-    with wave.open(str(path), "rb") as wf:
-        if (wf.getframerate(), wf.getsampwidth(), wf.getnchannels()) != (16000, 2, 1):
-            return None
-        raw = wf.readframes(wf.getnframes())
-
-    samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+def _vad_suggest_label_from_samples(samples):
+    # A starting-point default, not a real classifier -- speech-like
+    # activity anywhere in the clip suggests "unknown" (a real utterance,
+    # right command or not), no speech suggests "noise". `samples` is
+    # float32, normalized to [-1, 1], at 16kHz.
     session = _get_silero_session()
     state = np.zeros((2, 1, 128), dtype=np.float32)
     context = np.zeros((1, SILERO_CONTEXT_SAMPLES), dtype=np.float32)
@@ -625,6 +618,15 @@ def _vad_suggest_label(path):
     if total == 0:
         return None
     return "unknown" if (speech / total) > VAD_SPEECH_RATIO_THRESHOLD else "noise"
+
+
+def _vad_suggest_label(path):
+    with wave.open(str(path), "rb") as wf:
+        if (wf.getframerate(), wf.getsampwidth(), wf.getnchannels()) != (16000, 2, 1):
+            return None
+        raw = wf.readframes(wf.getnframes())
+    samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    return _vad_suggest_label_from_samples(samples)
 
 
 # Keyed by filename rather than recomputed on every poll -- captures are
@@ -873,9 +875,32 @@ def _low_confidence_classify_one(sample):
     }
 
 
+def _low_confidence_fetch_raw(sample_id):
+    r = requests.get(
+        f"{EI_API_BASE}/{cfg.EI_PROJECT_ID}/raw-data/{sample_id}",
+        headers=ei_headers(), timeout=30,
+    )
+    r.raise_for_status()
+    data = r.json()
+    values = [v[0] for v in data["payload"]["values"]]
+    frequency = data["sample"]["frequency"]
+    return values, frequency
+
+
+def _low_confidence_vad_for(sample_id):
+    try:
+        values, frequency = _low_confidence_fetch_raw(sample_id)
+        if frequency != 16000:
+            return None
+        samples = np.array(values, dtype=np.float32) / 32768.0
+        return _vad_suggest_label_from_samples(samples)
+    except (requests.RequestException, KeyError, ValueError, IndexError):
+        return None
+
+
 def _low_confidence_run(threshold):
     with _low_confidence_lock:
-        _low_confidence_state.update(running=True, done=0, total=0, threshold=threshold)
+        _low_confidence_state.update(running=True, done=0, total=0, results=[], threshold=threshold)
 
     samples = []
     for label in LOW_CONFIDENCE_TARGET_LABELS:
@@ -897,6 +922,16 @@ def _low_confidence_run(threshold):
                 _low_confidence_state["done"] += 1
 
     flagged.sort(key=lambda r: r["self_confidence"])
+
+    # A second, independent signal on just the (much smaller) flagged set --
+    # VAD doesn't know about "sonos play/pause/mute" as concepts, only
+    # speech vs. not, so it can corroborate or contradict the trained
+    # model's own confidence gap from an entirely different angle.
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        vad_futures = {pool.submit(_low_confidence_vad_for, r["id"]): r for r in flagged}
+        for future in as_completed(vad_futures):
+            vad_futures[future]["vad_suggestion"] = future.result()
+
     with _low_confidence_lock:
         _low_confidence_state.update(results=flagged, running=False, last_run_at=time.time())
 
@@ -942,14 +977,7 @@ def api_low_confidence_audio(sample_id):
     # its JSON payload instead, so playback means reconstructing a WAV from
     # those rather than proxying a file.
     try:
-        r = requests.get(
-            f"{EI_API_BASE}/{cfg.EI_PROJECT_ID}/raw-data/{sample_id}",
-            headers=ei_headers(), timeout=30,
-        )
-        r.raise_for_status()
-        data = r.json()
-        values = [v[0] for v in data["payload"]["values"]]
-        frequency = data["sample"]["frequency"]
+        values, frequency = _low_confidence_fetch_raw(sample_id)
     except (requests.RequestException, KeyError, ValueError) as e:
         return jsonify({"error": str(e)}), 502
 

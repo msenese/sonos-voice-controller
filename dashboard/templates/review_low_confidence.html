@@ -1,6 +1,14 @@
 <title>Low-Confidence Sample Review</title>
 <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<style>
+  /* Filenames are long enough to wrap awkwardly mid-row, so this page's
+     rows stack into two lines instead of the single-line layout
+     Recordings to Review uses. */
+  #review-list li { flex-direction: column; align-items: stretch; gap: 4px; }
+  .lc-top-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .lc-filename { color: var(--muted); font-size: 12px; padding-left: 22px; }
+</style>
 
 <div class="wrap">
   <header>
@@ -46,20 +54,27 @@ function renderResults(results) {
   }
   reviewList.innerHTML = results.map(r => {
     const options = labels.map(l => `<option value="${l}" ${l === r.top_label ? "selected" : ""}>${l}</option>`).join("");
+    const vadNote = r.vad_suggestion
+      ? ` &middot; VAD: ${r.vad_suggestion === "unknown" ? "speech detected" : "no speech"}`
+      : "";
     return `
       <li>
-        <span class="capture-row">
-          <button class="play-btn" data-id="${r.id}" title="Play">&#9654;</button>
-          <span>[${r.label}] ${formatPct(r.self_confidence)} self-confidence &middot; model leans '${r.top_label}' at ${formatPct(r.top_confidence)} &middot; ${r.filename}</span>
-        </span>
-        <span class="capture-actions">
-          <button class="correct" data-id="${r.id}" title="Leave this sample as-is">&check; Keep</button>
-          <select class="relabel-select" data-id="${r.id}">
-            <option value="" disabled>Reclassify as&hellip;</option>
-            ${options}
-          </select>
-          <button class="discard" data-id="${r.id}" title="Permanently delete from the dataset">&cross; Delete</button>
-        </span>
+        <div class="lc-top-row">
+          <span class="capture-row">
+            <button class="play-btn" data-id="${r.id}" title="Play">&#9654;</button>
+            <span>[${r.label}] ${formatPct(r.self_confidence)} self-confidence &middot; model leans '${r.top_label}' at ${formatPct(r.top_confidence)}${vadNote}</span>
+          </span>
+          <span class="capture-actions">
+            <button class="correct" data-id="${r.id}" title="Leave this sample as-is">&check; Keep</button>
+            <select class="relabel-select" data-id="${r.id}">
+              <option value="" disabled>Reclassify as&hellip;</option>
+              ${options}
+            </select>
+            <button class="use-suggestion" data-id="${r.id}" title="Submit the label currently selected above">Use</button>
+            <button class="discard" data-id="${r.id}" title="Permanently delete from the dataset">&cross; Delete</button>
+          </span>
+        </div>
+        <div class="lc-filename">${r.filename}</div>
       </li>
     `;
   }).join("");
@@ -113,6 +128,22 @@ reviewList.addEventListener("click", (e) => {
   }
   if (btn.classList.contains("correct")) {
     submitAction(btn, id, `/api/low-confidence/${id}/keep`, { method: "POST" });
+    return;
+  }
+  if (btn.classList.contains("use-suggestion")) {
+    // The dropdown starts pre-filled with the model's own top-alternative
+    // guess, which won't fire the "change" listener below on its own --
+    // selecting an already-selected option is a no-op in the DOM. This is
+    // the actual way to submit that pre-filled suggestion (or whatever
+    // you've since changed it to).
+    const select = btn.closest("li").querySelector(".relabel-select");
+    const label = select ? select.value : "";
+    if (!label) return;
+    submitAction(btn, id, `/api/low-confidence/${id}/relabel`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ label }),
+    });
     return;
   }
   if (btn.classList.contains("discard")) {
