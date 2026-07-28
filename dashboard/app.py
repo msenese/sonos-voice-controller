@@ -872,6 +872,7 @@ def _low_confidence_classify_one(sample):
     return {
         "id": sample["id"], "filename": sample["filename"], "label": sample["label"],
         "self_confidence": self_confidence, "top_label": top_label, "top_confidence": top_confidence,
+        "added": sample.get("added"),
     }
 
 
@@ -992,6 +993,27 @@ def api_low_confidence_audio(sample_id):
 
 @app.route("/api/low-confidence/<int:sample_id>/keep", methods=["POST"])
 def api_low_confidence_keep(sample_id):
+    _low_confidence_remove(sample_id)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/low-confidence/<int:sample_id>/disable", methods=["POST"])
+def api_low_confidence_disable(sample_id):
+    # Excludes from training without deleting -- same /disable endpoint
+    # used by fix-3sec-samples.py, reversible via Edge Impulse Studio
+    # (or the old delete-disabled-3sec-samples.py pattern, if a
+    # permanent removal is wanted later).
+    if not ei_admin_configured():
+        return jsonify({"error": "EI_ADMIN_API_KEY not configured in config.py (disable requires an Admin-role key)"}), 400
+    try:
+        r = requests.post(
+            f"{EI_API_BASE}/{cfg.EI_PROJECT_ID}/raw-data/{sample_id}/disable",
+            headers=ei_admin_headers(), json={}, timeout=15,
+        )
+    except requests.RequestException as e:
+        return jsonify({"error": str(e)}), 502
+    if r.status_code >= 300:
+        return jsonify({"error": f"Edge Impulse error {r.status_code}: {r.text[:200]}"}), 502
     _low_confidence_remove(sample_id)
     return jsonify({"ok": True})
 

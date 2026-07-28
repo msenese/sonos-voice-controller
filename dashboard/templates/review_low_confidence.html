@@ -45,6 +45,18 @@
   <div class="card">
     <h2>Flagged Samples</h2>
     <div class="status-line" id="review-status">Run an analysis to see flagged samples here.</div>
+    <div class="train-row">
+      <label><input type="checkbox" id="select-all-checkbox"> Select all</label>
+      <button id="disable-selected-btn">Disable Selected</button>
+      <label style="margin-left:auto;">Sort by
+        <select id="sort-select">
+          <option value="confidence-asc">Confidence (worst first)</option>
+          <option value="confidence-desc">Confidence (best first)</option>
+          <option value="date-desc">Date (newest first)</option>
+          <option value="date-asc">Date (oldest first)</option>
+        </select>
+      </label>
+    </div>
     <ul class="history-list" id="review-list"></ul>
     <audio id="review-audio" style="display:none;"></audio>
   </div>
@@ -74,12 +86,14 @@ function renderResults(results) {
     const vadNote = r.vad_suggestion
       ? ` &middot; VAD: ${r.vad_suggestion === "unknown" ? "speech detected" : "no speech"}`
       : "";
+    const dateNote = r.added ? ` &middot; ${new Date(r.added).toLocaleDateString()}` : "";
     return `
       <li>
         <div class="lc-top-row">
           <span class="capture-row">
+            <input type="checkbox" class="row-select" data-id="${r.id}">
             <button class="play-btn" data-id="${r.id}" title="Play">&#9654;</button>
-            <span>[${r.label}] ${formatPct(r.self_confidence)} self-confidence &middot; model leans '${r.top_label}' at ${formatPct(r.top_confidence)}${vadNote}</span>
+            <span>[${r.label}] ${formatPct(r.self_confidence)} self-confidence &middot; model leans '${r.top_label}' at ${formatPct(r.top_confidence)}${vadNote}${dateNote}</span>
           </span>
           <span class="capture-actions">
             <button class="correct" data-id="${r.id}" title="Leave this sample as-is">&check; Keep</button>
@@ -88,6 +102,7 @@ function renderResults(results) {
               ${options}
             </select>
             <button class="use-suggestion" data-id="${r.id}" title="Submit the label currently selected above">Use</button>
+            <button class="disable-btn" data-id="${r.id}" title="Exclude from training without deleting -- reversible">Disable</button>
             <button class="discard" data-id="${r.id}" title="Permanently delete from the dataset">&cross; Delete</button>
           </span>
         </div>
@@ -117,7 +132,7 @@ reviewAudio.addEventListener("pause", () => {
 function disableRow(el, disabled) {
   const row = el.closest("li");
   if (!row) return;
-  row.querySelectorAll("button, select").forEach(x => { x.disabled = disabled; });
+  row.querySelectorAll("button, select, input").forEach(x => { x.disabled = disabled; });
 }
 
 async function submitAction(el, id, url, options) {
@@ -163,6 +178,10 @@ reviewList.addEventListener("click", (e) => {
     });
     return;
   }
+  if (btn.classList.contains("disable-btn")) {
+    submitAction(btn, id, `/api/low-confidence/${id}/disable`, { method: "POST" });
+    return;
+  }
   if (btn.classList.contains("discard")) {
     submitAction(btn, id, `/api/low-confidence/${id}`, { method: "DELETE" });
   }
@@ -182,6 +201,67 @@ reviewList.addEventListener("change", (e) => {
 });
 
 let pollTimer = null;
+let currentResults = [];
+
+const sortSelect = document.getElementById("sort-select");
+
+function sortResults(results, sortBy) {
+  const sorted = results.slice();
+  switch (sortBy) {
+    case "confidence-asc": sorted.sort((a, b) => a.self_confidence - b.self_confidence); break;
+    case "confidence-desc": sorted.sort((a, b) => b.self_confidence - a.self_confidence); break;
+    case "date-desc": sorted.sort((a, b) => new Date(b.added || 0) - new Date(a.added || 0)); break;
+    case "date-asc": sorted.sort((a, b) => new Date(a.added || 0) - new Date(b.added || 0)); break;
+  }
+  return sorted;
+}
+
+function renderSorted() {
+  renderResults(sortResults(currentResults, sortSelect.value));
+}
+
+sortSelect.addEventListener("change", renderSorted);
+
+document.getElementById("select-all-checkbox").addEventListener("change", (e) => {
+  document.querySelectorAll(".row-select").forEach(cb => { cb.checked = e.target.checked; });
+});
+
+document.getElementById("disable-selected-btn").addEventListener("click", async () => {
+  // Snapshot now -- rows get removed from the DOM as each disable succeeds,
+  // so re-querying mid-loop would skip whatever's already gone.
+  const checkboxes = Array.from(document.querySelectorAll(".row-select:checked"));
+  if (checkboxes.length === 0) {
+    reviewStatus.textContent = "No samples selected.";
+    return;
+  }
+  const ok = confirm(
+    `Disable ${checkboxes.length} selected sample(s)? This excludes them from training without deleting them -- reversible in Edge Impulse Studio.`
+  );
+  if (!ok) return;
+
+  const bulkBtn = document.getElementById("disable-selected-btn");
+  bulkBtn.disabled = true;
+  let done = 0;
+  for (const cb of checkboxes) {
+    const id = cb.dataset.id;
+    const li = cb.closest("li");
+    try {
+      const res = await fetch(`/api/low-confidence/${id}/disable`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      currentResults = currentResults.filter(r => String(r.id) !== String(id));
+      li.remove();
+      done++;
+      reviewStatus.textContent = `Disabling... ${done}/${checkboxes.length}`;
+    } catch (e) {
+      reviewStatus.textContent = `Stopped after ${done}/${checkboxes.length}: ${e.message}`;
+      bulkBtn.disabled = false;
+      return;
+    }
+  }
+  bulkBtn.disabled = false;
+  reviewStatus.textContent = `Disabled ${done} sample(s).`;
+});
 
 async function pollStatus() {
   let data;
@@ -205,9 +285,10 @@ async function pollStatus() {
   if (data.last_run_at) {
     const when = new Date(data.last_run_at * 1000).toLocaleString();
     analysisStatus.textContent = `Last run: ${when}, threshold ${formatPct(data.threshold)}.`;
-    reviewStatus.textContent = `${data.results.length} sample(s) flagged, lowest self-confidence first.`;
+    reviewStatus.textContent = `${data.results.length} sample(s) flagged.`;
   }
-  renderResults(data.results);
+  currentResults = data.results;
+  renderSorted();
 }
 
 runBtn.addEventListener("click", async () => {
