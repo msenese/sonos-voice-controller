@@ -7,6 +7,12 @@
      Recordings to Review uses. */
   #review-list li { flex-direction: column; align-items: stretch; gap: 4px; }
   .lc-top-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+  /* justify-content: space-between only spaces items on the SAME line --
+     once .capture-actions wraps onto its own line (row text + 4 buttons is
+     wide), that line has just one item, so space-between does nothing and
+     it defaults to sitting flush left, right under the play button.
+     margin-left: auto keeps it pushed to the right on its own line too. */
+  .lc-top-row .capture-actions { margin-left: auto; }
   .lc-filename { color: var(--muted); font-size: 12px; padding-left: 22px; }
 
   /* Rows here are twice as tall as the shared .history-list default (220px)
