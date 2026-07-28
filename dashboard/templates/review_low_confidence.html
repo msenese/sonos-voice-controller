@@ -1,0 +1,187 @@
+<title>Low-Confidence Sample Review</title>
+<link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+
+<div class="wrap">
+  <header>
+    <h1>Low-Confidence Sample Review</h1>
+    <a href="/" class="badge">&larr; Back to Dashboard</a>
+  </header>
+
+  <div class="card">
+    <h2>Analysis</h2>
+    <div class="train-row">
+      <button id="run-analysis-btn" class="primary">Run Analysis</button>
+      <label>Threshold <input type="number" id="threshold-input" min="0" max="1" step="0.05" value="0.6" style="width:70px;"></label>
+    </div>
+    <div class="status-line" id="analysis-status">No analysis run yet. Runs the current trained model against every enabled "unknown"/"noise" sample and flags any where it doesn't confidently agree with the sample's own label. Takes a couple of minutes for the current dataset.</div>
+  </div>
+
+  <div class="card">
+    <h2>Flagged Samples</h2>
+    <div class="status-line" id="review-status">Run an analysis to see flagged samples here.</div>
+    <ul class="history-list" id="review-list"></ul>
+    <audio id="review-audio" style="display:none;"></audio>
+  </div>
+</div>
+
+<script>window.LABELS = {{ labels | tojson }};</script>
+<script>
+const runBtn = document.getElementById("run-analysis-btn");
+const thresholdInput = document.getElementById("threshold-input");
+const analysisStatus = document.getElementById("analysis-status");
+const reviewStatus = document.getElementById("review-status");
+const reviewList = document.getElementById("review-list");
+const reviewAudio = document.getElementById("review-audio");
+const labels = window.LABELS || [];
+
+function formatPct(v) {
+  return `${(v * 100).toFixed(1)}%`;
+}
+
+function renderResults(results) {
+  if (!results || results.length === 0) {
+    reviewList.innerHTML = `<li class="empty">Nothing flagged.</li>`;
+    return;
+  }
+  reviewList.innerHTML = results.map(r => {
+    const options = labels.map(l => `<option value="${l}" ${l === r.top_label ? "selected" : ""}>${l}</option>`).join("");
+    return `
+      <li>
+        <span class="capture-row">
+          <button class="play-btn" data-id="${r.id}" title="Play">&#9654;</button>
+          <span>[${r.label}] ${formatPct(r.self_confidence)} self-confidence &middot; model leans '${r.top_label}' at ${formatPct(r.top_confidence)} &middot; ${r.filename}</span>
+        </span>
+        <span class="capture-actions">
+          <button class="correct" data-id="${r.id}" title="Leave this sample as-is">&check; Keep</button>
+          <select class="relabel-select" data-id="${r.id}">
+            <option value="" disabled>Reclassify as&hellip;</option>
+            ${options}
+          </select>
+          <button class="discard" data-id="${r.id}" title="Permanently delete from the dataset">&cross; Delete</button>
+        </span>
+      </li>
+    `;
+  }).join("");
+}
+
+let currentlyPlayingBtn = null;
+
+function playSample(id, btn) {
+  if (currentlyPlayingBtn) currentlyPlayingBtn.classList.remove("playing");
+  reviewAudio.src = `/api/low-confidence/${id}/audio`;
+  reviewAudio.play();
+  currentlyPlayingBtn = btn;
+  btn.classList.add("playing");
+}
+
+reviewAudio.addEventListener("pause", () => {
+  if (currentlyPlayingBtn) {
+    currentlyPlayingBtn.classList.remove("playing");
+    currentlyPlayingBtn = null;
+  }
+});
+
+function disableRow(el, disabled) {
+  const row = el.closest("li");
+  if (!row) return;
+  row.querySelectorAll("button, select").forEach(x => { x.disabled = disabled; });
+}
+
+async function submitAction(el, id, url, options) {
+  disableRow(el, true);
+  try {
+    const res = await fetch(url, options);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    el.closest("li").remove();
+  } catch (e) {
+    reviewStatus.textContent = `Error: ${e.message}`;
+    disableRow(el, false);
+  }
+}
+
+reviewList.addEventListener("click", (e) => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  const id = btn.dataset.id;
+  if (!id) return;
+
+  if (btn.classList.contains("play-btn")) {
+    playSample(id, btn);
+    return;
+  }
+  if (btn.classList.contains("correct")) {
+    submitAction(btn, id, `/api/low-confidence/${id}/keep`, { method: "POST" });
+    return;
+  }
+  if (btn.classList.contains("discard")) {
+    submitAction(btn, id, `/api/low-confidence/${id}`, { method: "DELETE" });
+  }
+});
+
+reviewList.addEventListener("change", (e) => {
+  const select = e.target.closest(".relabel-select");
+  if (!select) return;
+  const id = select.dataset.id;
+  const label = select.value;
+  if (!id || !label) return;
+  submitAction(select, id, `/api/low-confidence/${id}/relabel`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ label }),
+  });
+});
+
+let pollTimer = null;
+
+async function pollStatus() {
+  let data;
+  try {
+    const res = await fetch("/api/low-confidence/status");
+    data = await res.json();
+  } catch (e) {
+    return;
+  }
+
+  if (data.running) {
+    runBtn.disabled = true;
+    analysisStatus.textContent = data.total > 0
+      ? `Classifying... ${data.done}/${data.total}`
+      : "Looking up samples...";
+    pollTimer = setTimeout(pollStatus, 1000);
+    return;
+  }
+
+  runBtn.disabled = false;
+  if (data.last_run_at) {
+    const when = new Date(data.last_run_at * 1000).toLocaleString();
+    analysisStatus.textContent = `Last run: ${when}, threshold ${formatPct(data.threshold)}.`;
+    reviewStatus.textContent = `${data.results.length} sample(s) flagged, lowest self-confidence first.`;
+  }
+  renderResults(data.results);
+}
+
+runBtn.addEventListener("click", async () => {
+  const threshold = Number(thresholdInput.value);
+  runBtn.disabled = true;
+  analysisStatus.textContent = "Starting...";
+  try {
+    const res = await fetch("/api/low-confidence/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ threshold }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+  } catch (e) {
+    analysisStatus.textContent = `Error: ${e.message}`;
+    runBtn.disabled = false;
+    return;
+  }
+  if (pollTimer) clearTimeout(pollTimer);
+  pollStatus();
+});
+
+pollStatus();
+</script>

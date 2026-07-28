@@ -4,12 +4,14 @@ import io
 import json
 import queue
 import re
+import struct
 import subprocess
 import sys
 import threading
 import time
 import wave
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 from pathlib import Path
 
@@ -813,6 +815,195 @@ def api_train_segment(sample_id):
         (TRAINING_DIR / filename).unlink(missing_ok=True)
 
     return jsonify({"split": len(segments), "original_deleted": original_deleted})
+
+
+# --- Low-confidence sample review ---
+# Runs the current trained model against every enabled "unknown"/"noise"
+# sample (GET /classify/{id}, confirmed via direct API probing to run
+# synchronously per sample against the live model, no job queue needed)
+# and flags any where the model's own confidence in that sample's
+# assigned label falls below a threshold -- see find-low-confidence-samples.py
+# for the original read-only version of this same analysis. This is the
+# interactive counterpart: a background thread does the ~2-minute classify
+# pass so the request doesn't hang, the frontend polls progress, and
+# Keep/Reclassify/Delete act directly on Edge Impulse the same way
+# Recordings to Review's Correct/relabel/Discard do.
+
+LOW_CONFIDENCE_TARGET_LABELS = ["unknown", "noise"]
+LOW_CONFIDENCE_THRESHOLD_DEFAULT = 0.6
+
+_low_confidence_lock = threading.Lock()
+_low_confidence_state = {
+    "running": False, "done": 0, "total": 0, "results": [],
+    "last_run_at": None, "threshold": LOW_CONFIDENCE_THRESHOLD_DEFAULT,
+}
+
+
+def _low_confidence_list_samples(label):
+    matches = []
+    offset = 0
+    while True:
+        r = requests.get(
+            f"{EI_API_BASE}/{cfg.EI_PROJECT_ID}/raw-data",
+            headers=ei_headers(),
+            params={"category": "all", "labels": json.dumps([label]), "limit": 100, "offset": offset},
+            timeout=30,
+        )
+        r.raise_for_status()
+        page = r.json().get("samples", [])
+        matches.extend(s for s in page if not s.get("isDisabled"))
+        if len(page) < 100:
+            break
+        offset += 100
+    return matches
+
+
+def _low_confidence_classify_one(sample):
+    r = requests.get(
+        f"{EI_API_BASE}/{cfg.EI_PROJECT_ID}/classify/{sample['id']}",
+        headers=ei_headers(), timeout=30,
+    )
+    r.raise_for_status()
+    result = r.json()["classifications"][0]["result"][0]
+    self_confidence = result.get(sample["label"], 0.0)
+    top_label, top_confidence = max(result.items(), key=lambda kv: kv[1])
+    return {
+        "id": sample["id"], "filename": sample["filename"], "label": sample["label"],
+        "self_confidence": self_confidence, "top_label": top_label, "top_confidence": top_confidence,
+    }
+
+
+def _low_confidence_run(threshold):
+    with _low_confidence_lock:
+        _low_confidence_state.update(running=True, done=0, total=0, threshold=threshold)
+
+    samples = []
+    for label in LOW_CONFIDENCE_TARGET_LABELS:
+        samples.extend(_low_confidence_list_samples(label))
+    with _low_confidence_lock:
+        _low_confidence_state["total"] = len(samples)
+
+    flagged = []
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        futures = {pool.submit(_low_confidence_classify_one, s): s for s in samples}
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+                if result["self_confidence"] < threshold:
+                    flagged.append(result)
+            except requests.RequestException:
+                pass
+            with _low_confidence_lock:
+                _low_confidence_state["done"] += 1
+
+    flagged.sort(key=lambda r: r["self_confidence"])
+    with _low_confidence_lock:
+        _low_confidence_state.update(results=flagged, running=False, last_run_at=time.time())
+
+
+def _low_confidence_remove(sample_id):
+    with _low_confidence_lock:
+        _low_confidence_state["results"] = [r for r in _low_confidence_state["results"] if r["id"] != sample_id]
+
+
+@app.route("/review-low-confidence")
+def review_low_confidence_page():
+    return render_template("review_low_confidence.html", labels=LABELS)
+
+
+@app.route("/api/low-confidence/run", methods=["POST"])
+def api_low_confidence_run():
+    if not ei_configured():
+        return jsonify({"error": "EI_API_KEY / EI_PROJECT_ID not configured in config.py"}), 400
+    with _low_confidence_lock:
+        if _low_confidence_state["running"]:
+            return jsonify({"error": "analysis already running"}), 409
+    body = request.get_json(silent=True) or {}
+    try:
+        threshold = float(body.get("threshold", LOW_CONFIDENCE_THRESHOLD_DEFAULT))
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid threshold"}), 400
+    if not (0.0 <= threshold <= 1.0):
+        return jsonify({"error": "threshold must be between 0 and 1"}), 400
+    threading.Thread(target=_low_confidence_run, args=(threshold,), daemon=True).start()
+    return jsonify({"started": True})
+
+
+@app.route("/api/low-confidence/status")
+def api_low_confidence_status():
+    with _low_confidence_lock:
+        return jsonify(dict(_low_confidence_state))
+
+
+@app.route("/api/low-confidence/<int:sample_id>/audio")
+def api_low_confidence_audio(sample_id):
+    # No binary sample-download endpoint exists on Edge Impulse's API (confirmed
+    # via probing) -- GET /raw-data/{id} embeds the raw PCM values directly in
+    # its JSON payload instead, so playback means reconstructing a WAV from
+    # those rather than proxying a file.
+    try:
+        r = requests.get(
+            f"{EI_API_BASE}/{cfg.EI_PROJECT_ID}/raw-data/{sample_id}",
+            headers=ei_headers(), timeout=30,
+        )
+        r.raise_for_status()
+        data = r.json()
+        values = [v[0] for v in data["payload"]["values"]]
+        frequency = data["sample"]["frequency"]
+    except (requests.RequestException, KeyError, ValueError) as e:
+        return jsonify({"error": str(e)}), 502
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(frequency)
+        wf.writeframes(struct.pack(f"<{len(values)}h", *values))
+    return Response(buf.getvalue(), mimetype="audio/wav")
+
+
+@app.route("/api/low-confidence/<int:sample_id>/keep", methods=["POST"])
+def api_low_confidence_keep(sample_id):
+    _low_confidence_remove(sample_id)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/low-confidence/<int:sample_id>/relabel", methods=["POST"])
+def api_low_confidence_relabel(sample_id):
+    if not ei_admin_configured():
+        return jsonify({"error": "EI_ADMIN_API_KEY not configured in config.py (relabel requires an Admin-role key)"}), 400
+    body = request.get_json(silent=True) or {}
+    label = body.get("label", "")
+    if label not in LABELS:
+        return jsonify({"error": f"label must be one of {LABELS}"}), 400
+    try:
+        r = requests.post(
+            f"{EI_API_BASE}/{cfg.EI_PROJECT_ID}/raw-data/{sample_id}/edit-label",
+            headers=ei_admin_headers(), json={"label": label}, timeout=15,
+        )
+    except requests.RequestException as e:
+        return jsonify({"error": str(e)}), 502
+    if r.status_code >= 300:
+        return jsonify({"error": f"Edge Impulse error {r.status_code}: {r.text[:200]}"}), 502
+    _low_confidence_remove(sample_id)
+    return jsonify({"ok": True, "label": label})
+
+
+@app.route("/api/low-confidence/<int:sample_id>", methods=["DELETE"])
+def api_low_confidence_delete(sample_id):
+    if not ei_admin_configured():
+        return jsonify({"error": "EI_ADMIN_API_KEY not configured in config.py (delete requires an Admin-role key)"}), 400
+    try:
+        r = requests.delete(
+            f"{EI_API_BASE}/{cfg.EI_PROJECT_ID}/raw-data/{sample_id}",
+            headers=ei_admin_headers(), timeout=15,
+        )
+    except requests.RequestException as e:
+        return jsonify({"error": str(e)}), 502
+    if r.status_code >= 300:
+        return jsonify({"error": f"Edge Impulse error {r.status_code}: {r.text[:200]}"}), 502
+    _low_confidence_remove(sample_id)
+    return jsonify({"ok": True})
 
 
 @app.route("/api/model/sample-counts")
