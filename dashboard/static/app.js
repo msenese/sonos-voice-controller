@@ -758,6 +758,26 @@ function renderConfusionMatrix(classNames, matrix) {
   table.innerHTML = html;
 }
 
+// Build and Activate were previously gated purely by having just clicked
+// Retrain/Build in THIS browser session -- but neither the backend nor Edge
+// Impulse actually require that: build-ondevice-model always builds
+// whatever's currently trained on the impulse (a dashboard retrain, a
+// manual EI Studio retrain, doesn't matter), and Activate just needs a
+// pending .eim to already be downloaded locally. Re-deriving Activate's
+// real availability from /api/model/pending (rather than only ever setting
+// it inside Build's own success handler) means it stays correct across
+// page reloads, failed retrains, and models built from a Studio-side
+// retrain the dashboard never triggered.
+async function refreshDeployAvailability() {
+  try {
+    const res = await fetch("/api/model/pending");
+    const data = await res.json();
+    activateBtn.disabled = !data.exists;
+  } catch (e) {
+    // Leave whatever state it was already in; this is just a refresh.
+  }
+}
+
 let lastModelAccuracy = null;
 
 async function loadModelMetrics() {
@@ -775,8 +795,11 @@ async function loadModelMetrics() {
 
 retrainBtn.addEventListener("click", async () => {
   retrainBtn.disabled = true;
+  // Only disabled for the duration of this retrain -- building from
+  // whatever was already trained mid-retrain would just repackage the
+  // outgoing model, not the new one, so this is a real (if brief)
+  // dependency, unlike the rest of the old gating here.
   buildBtn.disabled = true;
-  activateBtn.disabled = true;
   document.getElementById("model-metrics").style.display = "none";
   modelStatus.textContent = "Starting retrain job...";
   try {
@@ -791,11 +814,11 @@ retrainBtn.addEventListener("click", async () => {
     await fetch("/api/model/sample-counts/snapshot", { method: "POST" });
     await loadSampleCounts();
     modelStatus.textContent = "Retrain complete. Review the results, then build for the Pi.";
-    buildBtn.disabled = false;
   } catch (e) {
     modelStatus.textContent = `Error: ${e.message}`;
   } finally {
     retrainBtn.disabled = false;
+    buildBtn.disabled = false;
   }
 });
 
@@ -815,10 +838,22 @@ buildBtn.addEventListener("click", async () => {
     const dlData = await dlRes.json();
     if (!dlRes.ok) throw new Error(dlData.error);
     modelStatus.textContent = `Downloaded new model (${(dlData.size / 1024).toFixed(0)} KB). Ready to activate.`;
-    activateBtn.disabled = false;
+    // Metrics/sample-counts are only meaningful right after THIS dashboard
+    // triggered a retrain -- Build can now run standalone (e.g. after a
+    // manual EI Studio retrain the dashboard never saw), so don't assume
+    // they're already populated.
+    if (document.getElementById("model-metrics").style.display === "none") {
+      try {
+        await loadModelMetrics();
+      } catch (e) {
+        // Fine if this project's current impulse has no metrics to show yet.
+      }
+    }
   } catch (e) {
     modelStatus.textContent = `Error: ${e.message}`;
+  } finally {
     buildBtn.disabled = false;
+    await refreshDeployAvailability();
   }
 });
 
@@ -841,9 +876,9 @@ activateBtn.addEventListener("click", async () => {
       : `New model activated and ei-runner restarted. Git archive failed: ${archive.error || "unknown error"}`;
   } catch (e) {
     modelStatus.textContent = `Error: ${e.message}`;
-    activateBtn.disabled = false;
   } finally {
     loadModelStatus();
+    await refreshDeployAvailability();
   }
 });
 
@@ -1457,6 +1492,7 @@ loadAudioMode();
 loadAutoResume();
 loadKeepUnmuted();
 loadModelStatus();
+refreshDeployAvailability();
 setInterval(pollState, 1000);
 setInterval(pollSystem, 5000);
 setInterval(pollSonos, 5000);
