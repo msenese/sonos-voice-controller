@@ -2,6 +2,7 @@ import asyncio
 import websockets
 import json
 import requests
+import threading
 import time
 import spidev
 import math
@@ -15,6 +16,8 @@ import config as cfg
 STATE_FILE = "/tmp/sonos_controller_state.json"
 HISTORY_LIMIT = 50
 BUTTON_PIN = 17
+
+_state_write_lock = threading.Lock()
 
 last_trigger_time = 0
 consecutive_count = {}
@@ -88,11 +91,18 @@ def write_state():
         "muted": is_muted,
         "updated_at": time.time(),
     }
+    # write_state() is called from several async tasks that now run on
+    # separate threads (poll_player_state, watch_button, trigger_ha via
+    # asyncio.to_thread) -- without a lock, two concurrent calls sharing the
+    # same fixed tmp_path can race: one overwrites the other's tmp file
+    # before it renames, so the second rename fails with ENOENT even
+    # though nothing about the actual command failed.
     tmp_path = STATE_FILE + ".tmp"
     try:
-        with open(tmp_path, "w") as f:
-            json.dump(state, f)
-        os.replace(tmp_path, STATE_FILE)
+        with _state_write_lock:
+            with open(tmp_path, "w") as f:
+                json.dump(state, f)
+            os.replace(tmp_path, STATE_FILE)
     except OSError as e:
         print(f"[STATE] Failed to write state file: {e}")
 
@@ -194,13 +204,29 @@ def post_capture(label, score):
         pass
 
 
+def _set_muted(muted):
+    # Sets an absolute mute state rather than toggling -- used where the
+    # desired end state is known (e.g. "sonos play" auto-unmuting), where
+    # toggling off a possibly-stale `is_muted` read could flip the wrong
+    # way and mute instead of unmute.
+    global is_muted
+    headers = {
+        "Authorization": f"Bearer {cfg.HA_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    _ha_request("POST", f"{cfg.HA_URL}/api/services/media_player/volume_mute",
+        headers=headers,
+        json={"entity_id": cfg.SONOS_ENTITY, "is_volume_muted": muted})
+    is_muted = muted
+    write_state()
+
+
 def toggle_mute():
     # Shared by the physical button and the "sonos mute" voice trigger, so
     # both paths produce identical behavior: read the current HA mute
     # state, flip it, and let breathe() pick up the new `is_muted` value
     # for LED feedback (violet breathing) exactly as it already does for
     # the button.
-    global is_muted
     headers = {
         "Authorization": f"Bearer {cfg.HA_TOKEN}",
         "Content-Type": "application/json"
@@ -208,11 +234,7 @@ def toggle_mute():
     response = _ha_request("GET", f"{cfg.HA_URL}/api/states/{cfg.SONOS_ENTITY}", headers=headers)
     state = response.json()
     is_muted_current = state.get("attributes", {}).get("is_volume_muted", False)
-    _ha_request("POST", f"{cfg.HA_URL}/api/services/media_player/volume_mute",
-        headers=headers,
-        json={"entity_id": cfg.SONOS_ENTITY, "is_volume_muted": not is_muted_current})
-    is_muted = not is_muted_current
-    write_state()
+    _set_muted(not is_muted_current)
 
 
 def trigger_ha(action):
@@ -249,6 +271,16 @@ def trigger_ha(action):
             # of visibly lagging behind it.
             is_paused = action == "sonos pause"
             write_state()
+
+            # "sonos play" while muted+paused should bring back both --
+            # otherwise playback resumes silently and it looks like the
+            # command did nothing.
+            if action == "sonos play" and is_muted:
+                try:
+                    _set_muted(False)
+                    print("[HA] Also unmuted (was muted) as part of sonos play")
+                except Exception as e:
+                    print(f"[HA] auto-unmute error: {e}")
     except Exception as e:
         print(f"[HA] {endpoint} error: {e}")
 
