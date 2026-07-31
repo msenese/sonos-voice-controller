@@ -281,6 +281,24 @@ def trigger_ha(action):
                     print("[HA] Also unmuted (was muted) as part of sonos play")
                 except Exception as e:
                     print(f"[HA] auto-unmute error: {e}")
+
+            # "sonos play" should always be audible -- if the volume was
+            # manually left at 0, unmuting/unpausing alone still plays
+            # silently. Only nudge it up from exactly 0; leave any other
+            # level untouched.
+            if action == "sonos play":
+                try:
+                    vol_response = _ha_request(
+                        "GET", f"{cfg.HA_URL}/api/states/{cfg.SONOS_ENTITY}", headers=headers)
+                    volume_level = vol_response.json().get("attributes", {}).get("volume_level", 1.0)
+                    if volume_level is not None and volume_level <= 0.0:
+                        _ha_request(
+                            "POST", f"{cfg.HA_URL}/api/services/media_player/volume_set",
+                            headers=headers,
+                            json={"entity_id": cfg.SONOS_ENTITY, "volume_level": 0.1})
+                        print("[HA] Volume was 0 -- raised to 10% as part of sonos play")
+                except Exception as e:
+                    print(f"[HA] auto-volume error: {e}")
     except Exception as e:
         print(f"[HA] {endpoint} error: {e}")
 
