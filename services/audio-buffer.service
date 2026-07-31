@@ -8,6 +8,20 @@ WorkingDirectory=/home/msenese
 ExecStart=/usr/bin/python3 -u /home/msenese/audio-buffer.py
 Restart=always
 RestartSec=5
+# This Pi is memory-constrained (Zero 2 W, 415MB RAM) and runs under real,
+# persistent zram swap pressure alongside the desktop, dashboard, and
+# ei-runner. In Buffer mode this is the one extra continuously-running
+# audio process in the chain (real mic -> here -> loopback -> ei-runner),
+# so any scheduling delay or swap-out here shows up as dropped/misaligned
+# audio right when a trigger phrase happens -- lower responsiveness than
+# Classic mode, without necessarily tripping the health/restart counters.
+# Elevate its CPU/IO priority and make it a late OOM/swap-reclaim target
+# so it isn't the thing that gets starved under load.
+Nice=-10
+IOSchedulingClass=realtime
+IOSchedulingPriority=0
+OOMScoreAdjust=-500
+AmbientCapabilities=CAP_SYS_NICE
 
 [Install]
 WantedBy=multi-user.target
