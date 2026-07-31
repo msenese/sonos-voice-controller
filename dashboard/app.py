@@ -710,6 +710,51 @@ def _upload_capture_and_remove(filename, label):
     return jsonify({"uploaded": filename, "label": label, "deleted": True})
 
 
+@app.route("/api/captures/<path:filename>/trim", methods=["POST"])
+def api_captures_trim(filename):
+    if Path(filename).name != filename:
+        return jsonify({"error": "invalid filename"}), 400
+    body = request.get_json(silent=True) or {}
+    try:
+        start_ms = int(body.get("start_ms"))
+        end_ms = int(body.get("end_ms"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "start_ms and end_ms must be integers"}), 400
+    if start_ms < 0 or end_ms <= start_ms:
+        return jsonify({"error": "end_ms must be greater than start_ms"}), 400
+
+    path = CAPTURE_DIR / filename
+    if not path.is_file():
+        return jsonify({"error": "file not found"}), 404
+
+    with wave.open(str(path), "rb") as wf:
+        frame_rate = wf.getframerate()
+        sample_width = wf.getsampwidth()
+        n_channels = wf.getnchannels()
+        raw = wf.readframes(wf.getnframes())
+
+    frame_size = sample_width * n_channels
+    total_frames = len(raw) // frame_size
+    start_frame = max(0, min(int(frame_rate * start_ms / 1000), total_frames))
+    end_frame = max(start_frame, min(int(frame_rate * end_ms / 1000), total_frames))
+    trimmed = raw[start_frame * frame_size:end_frame * frame_size]
+
+    # Overwritten in place under the same filename, rather than written as a
+    # new file -- the rest of the review flow (confirm/relabel/delete, the
+    # VAD suggestion cache) all key off filename, so this keeps trimming a
+    # drop-in step before those rather than a parallel path.
+    with wave.open(str(path), "wb") as wf:
+        wf.setnchannels(n_channels)
+        wf.setsampwidth(sample_width)
+        wf.setframerate(frame_rate)
+        wf.writeframes(trimmed)
+
+    with _vad_cache_lock:
+        _vad_suggestion_cache.pop(filename, None)
+
+    return jsonify({"filename": filename, "trimmed_ms": round((end_frame - start_frame) * 1000 / frame_rate)})
+
+
 @app.route("/api/captures/<path:filename>/confirm", methods=["POST"])
 def api_captures_confirm(filename):
     label = parse_capture_filename(filename)

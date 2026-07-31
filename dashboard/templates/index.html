@@ -116,6 +116,20 @@
     </ul>
     <button id="save-all-suggestions-btn" class="primary" style="display:none; margin-top:10px;" title="Uploads every VAD-suggested label below in one pass, for captures you've already listened to and agree with">Save All Suggestions</button>
     <audio id="capture-audio" style="display:none;"></audio>
+
+    <div id="capture-trim" style="display:none; margin-top:16px; padding-top:16px; border-top:1px solid var(--gridline);">
+      <div class="field">
+        <div class="field-head"><span>Trim length (ms)</span><span class="value" id="trim-length-value">1300</span></div>
+        <input type="range" id="trim-length" min="500" max="4000" step="50" value="1300">
+      </div>
+      <canvas id="trim-canvas" width="900" height="140" style="width:100%; height:140px; display:block; margin-top:10px; border-radius:6px; border:1px solid var(--border); touch-action:none;"></canvas>
+      <div class="train-row" style="margin-top:8px;">
+        <button id="trim-preview-btn">&#9654; Preview Selection</button>
+        <button id="trim-save-btn" class="primary">Trim &amp; Keep This Range</button>
+        <button id="trim-cancel-btn">Cancel</button>
+      </div>
+      <div class="status-line" id="trim-status">Drag the highlighted window to the part of the recording that has the command. Defaulted to the loudest {{ '1300' }}ms.</div>
+    </div>
   </div>
 
   <div class="workflow-group" data-collapse-id="model-training" data-order-id="model-training">

@@ -1017,6 +1017,7 @@ async function loadCaptures() {
               ${options}
             </select>
             <button class="use-suggestion" data-filename="${c.filename}" title="Submit the label currently selected above" ${suggestion ? "" : "disabled"}>Use</button>
+            <button class="trim" data-filename="${c.filename}" title="Cut this down to just the command, before uploading">Trim</button>
             <button class="discard" data-filename="${c.filename}" title="Not usable for training &mdash; delete without uploading">&cross; Discard</button>
           </span>
         </li>
@@ -1092,6 +1093,11 @@ capturesList.addEventListener("click", (e) => {
 
   if (btn.classList.contains("discard")) {
     submitCaptureAction(btn, filename, `/api/captures/${encodeURIComponent(filename)}`, { method: "DELETE" });
+    return;
+  }
+
+  if (btn.classList.contains("trim")) {
+    openTrimPanel(filename);
   }
 });
 
@@ -1149,6 +1155,211 @@ saveAllSuggestionsBtn.addEventListener("click", async () => {
   }
   saveAllSuggestionsBtn.disabled = false;
   await loadCaptures();
+});
+
+// --- Capture trim (crop a wide trigger-capture down to just the command) ---
+//
+// The ring buffer is sized generously (currently 4s) so Buffer mode's relay
+// latency can't make it miss the actual command, but that means most of a
+// capture is dead air before/after the phrase. Decoded and trimmed entirely
+// client-side via the Web Audio API -- the wav is already servable locally,
+// so there's no need for a round trip just to get waveform data.
+
+const captureTrimPanel = document.getElementById("capture-trim");
+const trimCanvas = document.getElementById("trim-canvas");
+const trimCtx = trimCanvas.getContext("2d");
+const trimLengthInput = document.getElementById("trim-length");
+const trimLengthValue = document.getElementById("trim-length-value");
+const trimStatus = document.getElementById("trim-status");
+const trimPreviewBtn = document.getElementById("trim-preview-btn");
+const trimSaveBtn = document.getElementById("trim-save-btn");
+const trimCancelBtn = document.getElementById("trim-cancel-btn");
+
+let trimFilename = null;
+let trimAudioBuffer = null;
+let trimWindowStartMs = 0;
+let trimWindowLengthMs = Number(trimLengthInput.value);
+let trimDragging = false;
+let trimAudioCtx = null;
+let trimPreviewSource = null;
+
+function getTrimAudioContext() {
+  if (!trimAudioCtx) trimAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  return trimAudioCtx;
+}
+
+function getTrimDurationMs() {
+  return trimAudioBuffer ? (trimAudioBuffer.length / trimAudioBuffer.sampleRate) * 1000 : 0;
+}
+
+function clampTrimStart(startMs) {
+  const durationMs = getTrimDurationMs();
+  return Math.max(0, Math.min(startMs, Math.max(0, durationMs - trimWindowLengthMs)));
+}
+
+// A simple RMS-energy sliding window over the decoded samples -- picks a
+// reasonable starting point for where the command actually is, since
+// scrubbing by ear through several seconds of mostly-silence to find it is
+// exactly the friction this is meant to remove. Still just a default: drag
+// the window anywhere afterward.
+function findLoudestWindowMs(buffer, windowMs) {
+  const sr = buffer.sampleRate;
+  const samples = buffer.getChannelData(0);
+  const windowSamples = Math.max(1, Math.round((windowMs / 1000) * sr));
+  if (windowSamples >= samples.length) return 0;
+
+  const hopSamples = Math.max(1, Math.round(sr * 0.02)); // 20ms hop
+  let bestStart = 0;
+  let bestEnergy = -1;
+  for (let start = 0; start + windowSamples <= samples.length; start += hopSamples) {
+    let energy = 0;
+    for (let i = start; i < start + windowSamples; i++) energy += samples[i] * samples[i];
+    if (energy > bestEnergy) {
+      bestEnergy = energy;
+      bestStart = start;
+    }
+  }
+  return (bestStart / sr) * 1000;
+}
+
+function drawTrimWaveform() {
+  const width = trimCanvas.width;
+  const height = trimCanvas.height;
+  trimCtx.clearRect(0, 0, width, height);
+  if (!trimAudioBuffer) return;
+
+  const samples = trimAudioBuffer.getChannelData(0);
+  const durationMs = getTrimDurationMs();
+  const samplesPerPixel = Math.max(1, Math.floor(samples.length / width));
+  const mid = height / 2;
+
+  trimCtx.strokeStyle = cssVar("--series-1") || "#2a78d6";
+  trimCtx.lineWidth = 1;
+  for (let x = 0; x < width; x++) {
+    const start = x * samplesPerPixel;
+    let min = 0, max = 0;
+    for (let i = 0; i < samplesPerPixel; i++) {
+      const v = samples[start + i] || 0;
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+    trimCtx.beginPath();
+    trimCtx.moveTo(x + 0.5, mid + min * mid);
+    trimCtx.lineTo(x + 0.5, mid + max * mid);
+    trimCtx.stroke();
+  }
+
+  const x1 = (trimWindowStartMs / durationMs) * width;
+  const x2 = ((trimWindowStartMs + trimWindowLengthMs) / durationMs) * width;
+  trimCtx.fillStyle = "rgba(27, 175, 122, 0.18)";
+  trimCtx.fillRect(x1, 0, x2 - x1, height);
+  trimCtx.fillStyle = "#1baf7a";
+  trimCtx.fillRect(x1 - 2, 0, 4, height);
+  trimCtx.fillRect(x2 - 2, 0, 4, height);
+}
+
+function trimMsFromClientX(clientX) {
+  const rect = trimCanvas.getBoundingClientRect();
+  const x = (clientX - rect.left) * (trimCanvas.width / rect.width);
+  return (x / trimCanvas.width) * getTrimDurationMs();
+}
+
+function setTrimWindowCenterMs(centerMs) {
+  trimWindowStartMs = clampTrimStart(centerMs - trimWindowLengthMs / 2);
+  drawTrimWaveform();
+}
+
+trimCanvas.addEventListener("pointerdown", (e) => {
+  if (!trimAudioBuffer) return;
+  trimDragging = true;
+  trimCanvas.setPointerCapture(e.pointerId);
+  setTrimWindowCenterMs(trimMsFromClientX(e.clientX));
+});
+
+trimCanvas.addEventListener("pointermove", (e) => {
+  if (!trimDragging) return;
+  setTrimWindowCenterMs(trimMsFromClientX(e.clientX));
+});
+
+trimCanvas.addEventListener("pointerup", () => { trimDragging = false; });
+trimCanvas.addEventListener("pointercancel", () => { trimDragging = false; });
+
+trimLengthInput.addEventListener("input", () => {
+  trimWindowLengthMs = Number(trimLengthInput.value);
+  trimLengthValue.textContent = trimWindowLengthMs;
+  trimWindowStartMs = clampTrimStart(trimWindowStartMs);
+  drawTrimWaveform();
+});
+
+async function openTrimPanel(filename) {
+  trimFilename = filename;
+  trimAudioBuffer = null;
+  trimSaveBtn.disabled = true;
+  trimPreviewBtn.disabled = true;
+  trimStatus.textContent = "Loading waveform...";
+  captureTrimPanel.style.display = "";
+  captureTrimPanel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  drawTrimWaveform();
+
+  try {
+    const res = await fetch(`/trigger-captures/${encodeURIComponent(filename)}`);
+    const arrayBuffer = await res.arrayBuffer();
+    trimAudioBuffer = await getTrimAudioContext().decodeAudioData(arrayBuffer);
+
+    trimWindowLengthMs = Math.min(Number(trimLengthInput.value), getTrimDurationMs());
+    trimWindowStartMs = clampTrimStart(findLoudestWindowMs(trimAudioBuffer, trimWindowLengthMs));
+
+    trimSaveBtn.disabled = false;
+    trimPreviewBtn.disabled = false;
+    trimStatus.textContent = `Defaulted to the loudest ${trimWindowLengthMs}ms of this ${getTrimDurationMs().toFixed(0)}ms recording -- drag to adjust, or use the slider to change the window length.`;
+    drawTrimWaveform();
+  } catch (e) {
+    trimStatus.textContent = `Could not load waveform: ${e.message}`;
+  }
+}
+
+trimPreviewBtn.addEventListener("click", () => {
+  if (!trimAudioBuffer) return;
+  if (trimPreviewSource) {
+    try { trimPreviewSource.stop(); } catch (e) { /* already stopped */ }
+  }
+  const ctx = getTrimAudioContext();
+  const source = ctx.createBufferSource();
+  source.buffer = trimAudioBuffer;
+  source.connect(ctx.destination);
+  source.start(0, trimWindowStartMs / 1000, trimWindowLengthMs / 1000);
+  trimPreviewSource = source;
+});
+
+trimCancelBtn.addEventListener("click", () => {
+  captureTrimPanel.style.display = "none";
+  trimFilename = null;
+  trimAudioBuffer = null;
+});
+
+trimSaveBtn.addEventListener("click", async () => {
+  if (!trimFilename || !trimAudioBuffer) return;
+  trimSaveBtn.disabled = true;
+  trimStatus.textContent = "Trimming...";
+  try {
+    const res = await fetch(`/api/captures/${encodeURIComponent(trimFilename)}/trim`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        start_ms: Math.round(trimWindowStartMs),
+        end_ms: Math.round(trimWindowStartMs + trimWindowLengthMs),
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    captureTrimPanel.style.display = "none";
+    trimFilename = null;
+    trimAudioBuffer = null;
+    await loadCaptures();
+  } catch (e) {
+    trimStatus.textContent = `Error: ${e.message}`;
+    trimSaveBtn.disabled = false;
+  }
 });
 
 // --- Audio pipeline mode (Classic / Buffer) ---
