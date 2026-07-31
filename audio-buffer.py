@@ -13,7 +13,18 @@ from flask import Flask, abort, jsonify, request
 
 SAMPLE_RATE = 16000
 CHANNELS = 1
-BUFFER_SECONDS = 1.3
+# In Buffer mode, the trigger only fires after audio has gone through the
+# full forwarding+detection relay (block chunking -> queue -> ALSA loopback
+# -> sox -> ei-runner's inference window -> CONSECUTIVE_REQUIRED consecutive
+# hits) -- much slower than a direct mic read. This ring buffer, though,
+# keeps recording from the real mic in real time the whole time. A short
+# buffer (previously 1.3s, tuned for Classic mode's near-zero relay latency)
+# can fully wrap past the actual trigger phrase before /capture is ever
+# called, so the snapshot comes back as background noise or just the tail
+# end. Sized generously here so the phrase is still in the window even
+# with multiple seconds of relay latency -- memory cost is trivial either
+# way (a few hundred KB of int16 samples).
+BUFFER_SECONDS = 4.0
 BUFFER_SAMPLES = int(SAMPLE_RATE * BUFFER_SECONDS)
 BLOCK_SIZE = 1600  # 100ms per callback
 BLOCK_BYTES = BLOCK_SIZE * 2  # int16
