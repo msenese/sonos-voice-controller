@@ -1,3 +1,4 @@
+import io
 import queue
 import re
 import subprocess
@@ -9,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
-from flask import Flask, abort, jsonify, request
+from flask import Flask, Response, abort, jsonify, request
 
 SAMPLE_RATE = 16000
 CHANNELS = 1
@@ -86,6 +87,16 @@ _last_output_time = None
 _input_restart_count = 0
 _output_status_count = 0
 
+# Forward-looking capture (e.g. "record the next N seconds of a spoken
+# command after a wake trigger") -- distinct from the ring buffer above,
+# which only looks backward. Each in-progress /capture-forward request
+# registers a callback here; _handle_input_block feeds it live blocks as
+# they arrive, same as it already feeds the ring buffer and forward queue.
+# A list rather than a single slot so overlapping requests don't clobber
+# each other.
+_forward_capture_listeners = []
+_forward_capture_lock = threading.Lock()
+
 app = Flask(__name__)
 
 
@@ -102,6 +113,11 @@ def _handle_input_block(mono):
             _buffer[_write_pos:] = mono[:first_part]
             _buffer[:end_pos - BUFFER_SAMPLES] = mono[first_part:]
         _write_pos = end_pos % BUFFER_SAMPLES
+
+    with _forward_capture_lock:
+        listeners = list(_forward_capture_listeners)
+    for listener in listeners:
+        listener(mono)
 
     try:
         _forward_queue.put_nowait(mono.copy())
@@ -221,6 +237,64 @@ def capture():
     return jsonify({"filename": filename})
 
 
+MIN_FORWARD_CAPTURE_SECONDS = 0.5
+MAX_FORWARD_CAPTURE_SECONDS = 15
+DEFAULT_FORWARD_CAPTURE_SECONDS = 4.5
+
+
+@app.route("/capture-forward", methods=["POST"])
+def capture_forward():
+    # Records the NEXT N seconds of live mic audio and returns it as a WAV,
+    # for callers that need to capture what's said *after* some trigger
+    # moment (e.g. a follow-up voice command) rather than a snapshot of
+    # what's already in the ring buffer. Only meaningful while this service
+    # owns the mic (Buffer mode) -- there's no other way to get a second,
+    # independent capture stream without a conflicting second device open.
+    body = request.get_json(silent=True) or {}
+    try:
+        duration_seconds = float(body.get("duration_seconds", DEFAULT_FORWARD_CAPTURE_SECONDS))
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid duration_seconds"}), 400
+    if not (MIN_FORWARD_CAPTURE_SECONDS <= duration_seconds <= MAX_FORWARD_CAPTURE_SECONDS):
+        return jsonify({
+            "error": f"duration_seconds must be between {MIN_FORWARD_CAPTURE_SECONDS} "
+                     f"and {MAX_FORWARD_CAPTURE_SECONDS}"
+        }), 400
+
+    target_samples = int(SAMPLE_RATE * duration_seconds)
+    collected = []
+    collected_samples = 0
+    done_event = threading.Event()
+
+    def on_block(mono):
+        nonlocal collected_samples
+        collected.append(mono)
+        collected_samples += len(mono)
+        if collected_samples >= target_samples:
+            done_event.set()
+
+    with _forward_capture_lock:
+        _forward_capture_listeners.append(on_block)
+    try:
+        # A generous few seconds of slack on top of the requested duration --
+        # this should only ever fire if the input thread has actually died,
+        # since normal operation delivers blocks every ~100ms.
+        if not done_event.wait(timeout=duration_seconds + 5):
+            return jsonify({"error": "timed out waiting for audio -- is the input stream alive?"}), 504
+    finally:
+        with _forward_capture_lock:
+            _forward_capture_listeners.remove(on_block)
+
+    samples = np.concatenate(collected)[:target_samples]
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(CHANNELS)
+        wf.setsampwidth(2)
+        wf.setframerate(SAMPLE_RATE)
+        wf.writeframes(samples.tobytes())
+    return Response(buf.getvalue(), mimetype="audio/wav")
+
+
 @app.route("/captures")
 def list_captures():
     CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
@@ -260,4 +334,8 @@ if __name__ == "__main__":
 
     threading.Thread(target=input_reader_thread, daemon=True).start()
 
-    app.run(host="0.0.0.0", port=8081)
+    # threaded=True matters now beyond convenience: /capture-forward blocks
+    # its own request thread for several seconds, and without this the
+    # single-threaded dev server would stall /health, /capture, and
+    # /captures (the dashboard's poll) for that whole window too.
+    app.run(host="0.0.0.0", port=8081, threaded=True)

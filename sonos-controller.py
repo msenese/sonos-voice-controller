@@ -142,10 +142,14 @@ async def breathe():
 
 
 async def flash_green():
+    await flash_color(0, 20, 0)
+
+
+async def flash_color(r, g, b):
     global led_override
     led_override = True
     for _ in range(2):
-        set_leds(0, 20, 0)
+        set_leds(r, g, b)
         await asyncio.sleep(0.1)
         set_leds(0, 0, 0)
         await asyncio.sleep(0.1)
@@ -202,6 +206,68 @@ def post_capture(label, score):
         )
     except Exception:
         pass
+
+
+# Temporary stand-in for a not-yet-trained wake word: "sonos mute" doubles as
+# a trigger to capture a few seconds of follow-up speech and relay it to an
+# external voice-assistant HTTP endpoint on the LAN. Requires Buffer mode --
+# see audio-buffer.py's /capture-forward for why this can't just open the mic
+# a second time directly (ei-runner/sox already hold it, and sonos-controller
+# .service Requires=ei-runner.service, so this process can't stop-and-restart
+# ei-runner to free it up without killing itself in the process).
+VOICE_CAPTURE_SECONDS = 4.5
+VOICE_ASSISTANT_TIMEOUT = 20  # transcription + local LLM + HA round trip
+
+
+def _capture_voice_command_wav():
+    r = requests.post(
+        "http://localhost:8081/capture-forward",
+        json={"duration_seconds": VOICE_CAPTURE_SECONDS},
+        timeout=VOICE_CAPTURE_SECONDS + 5,
+    )
+    r.raise_for_status()
+    return r.content
+
+
+def _send_to_voice_assistant(wav_bytes):
+    response = requests.post(
+        cfg.VOICE_ASSISTANT_URL,
+        headers={"X-Voice-Secret": cfg.VOICE_ASSISTANT_SECRET},
+        files={"audio": ("command.wav", wav_bytes, "audio/wav")},
+        timeout=VOICE_ASSISTANT_TIMEOUT,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+async def handle_voice_command():
+    # Runs as an independent background task (not awaited inline with the
+    # mute toggle) so a slow transcription/LLM round trip on the M1 never
+    # delays processing of the next detection message off the websocket.
+    if not getattr(cfg, "VOICE_ASSISTANT_SECRET", None) or cfg.VOICE_ASSISTANT_SECRET == "your-voice-assistant-shared-secret-here":
+        return
+
+    try:
+        wav_bytes = await asyncio.to_thread(_capture_voice_command_wav)
+    except requests.RequestException as e:
+        print(f"[VOICE] Could not capture follow-up audio (Buffer mode required): {e}")
+        return
+
+    try:
+        result = await asyncio.to_thread(_send_to_voice_assistant, wav_bytes)
+    except requests.RequestException as e:
+        print(f"[VOICE] Assistant request failed: {e}")
+        await flash_color(30, 0, 0)
+        return
+
+    print(
+        f"[VOICE] transcript={result.get('transcript')!r} action={result.get('action')} "
+        f"ha_success={result.get('ha_success')} dry_run={result.get('dry_run')}"
+    )
+    if result.get("ha_success"):
+        await flash_green()
+    else:
+        await flash_color(30, 20, 0)
 
 
 def _set_muted(muted):
@@ -397,6 +463,12 @@ async def listen():
                                             "score": score,
                                             "timestamp": now,
                                         })
+                                        if label == "sonos mute":
+                                            # Fire-and-forget: this can take several
+                                            # seconds (capture + transcription + LLM),
+                                            # and must not delay handling the next
+                                            # detection off the websocket.
+                                            asyncio.create_task(handle_voice_command())
                                         await asyncio.to_thread(trigger_ha, label)
                                         await asyncio.to_thread(post_capture, label, score)
                                         await flash_green()
