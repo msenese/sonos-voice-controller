@@ -210,23 +210,54 @@ def post_capture(label, score):
 
 # Temporary stand-in for a not-yet-trained wake word: "sonos mute" doubles as
 # a trigger to capture a few seconds of follow-up speech and relay it to an
-# external voice-assistant HTTP endpoint on the LAN. Requires Buffer mode --
-# see audio-buffer.py's /capture-forward for why this can't just open the mic
-# a second time directly (ei-runner/sox already hold it, and sonos-controller
-# .service Requires=ei-runner.service, so this process can't stop-and-restart
-# ei-runner to free it up without killing itself in the process).
-VOICE_CAPTURE_SECONDS = 4.5
+# external voice-assistant HTTP endpoint on the LAN.
+#
+# Buffer mode's relay pipeline (block chunking -> queue -> ALSA loopback ->
+# sox -> ei-runner's inference) proved too unreliable in practice for live
+# use -- repeated real-world testing got zero clean "sonos mute" detections
+# in a row despite the trigger word being said correctly, where Classic
+# mode's direct mic read is consistently fast and reliable. So instead of
+# tapping audio-buffer.py's live stream (which needs Buffer mode running
+# all the time just for this one feature), this briefly stops ei-runner to
+# free the mic, captures directly with arecord, then restarts ei-runner --
+# a full, if brief, detection blackout during the capture+restart window,
+# rather than a permanent responsiveness hit on every command the rest of
+# the time. Only safe to do from in here because sonos-controller.service
+# no longer Requires=ei-runner.service (see services/sonos-controller.service)
+# -- otherwise stopping it would cascade-stop this very process too.
+VOICE_CAPTURE_SECONDS = 5
+VOICE_CAPTURE_DEVICE = "plughw:wm8960soundcard,0"  # matches audio-buffer.py's INPUT_DEVICE_ARECORD
+VOICE_CAPTURE_TMP_PATH = "/tmp/voice_command_capture.wav"
+EI_RUNNER_SERVICE = "ei-runner.service"
 VOICE_ASSISTANT_TIMEOUT = 20  # transcription + local LLM + HA round trip
 
 
 def _capture_voice_command_wav():
-    r = requests.post(
-        "http://localhost:8081/capture-forward",
-        json={"duration_seconds": VOICE_CAPTURE_SECONDS},
-        timeout=VOICE_CAPTURE_SECONDS + 5,
-    )
-    r.raise_for_status()
-    return r.content
+    subprocess.run(["systemctl", "stop", EI_RUNNER_SERVICE], check=True, timeout=15)
+    try:
+        # A brief pause after the stop call returns -- systemd only confirms
+        # the unit's reported as stopped, not that sox has actually released
+        # the ALSA device yet, and arecord failing to open it immediately
+        # after would be a worse failure mode than a short, harmless wait.
+        time.sleep(0.5)
+        subprocess.run(
+            [
+                "arecord", "-D", VOICE_CAPTURE_DEVICE,
+                "-f", "S16_LE", "-r", "16000", "-c", "1",
+                "-d", str(VOICE_CAPTURE_SECONDS), "-t", "wav",
+                VOICE_CAPTURE_TMP_PATH,
+            ],
+            check=True, timeout=VOICE_CAPTURE_SECONDS + 5,
+        )
+        with open(VOICE_CAPTURE_TMP_PATH, "rb") as f:
+            return f.read()
+    finally:
+        # Always restore detection, even if the capture itself failed.
+        subprocess.run(["systemctl", "start", EI_RUNNER_SERVICE], check=False, timeout=15)
+        try:
+            os.remove(VOICE_CAPTURE_TMP_PATH)
+        except OSError:
+            pass
 
 
 def _send_to_voice_assistant(wav_bytes):
@@ -249,8 +280,8 @@ async def handle_voice_command():
 
     try:
         wav_bytes = await asyncio.to_thread(_capture_voice_command_wav)
-    except requests.RequestException as e:
-        print(f"[VOICE] Could not capture follow-up audio (Buffer mode required): {e}")
+    except (subprocess.SubprocessError, OSError) as e:
+        print(f"[VOICE] Could not capture follow-up audio: {e}")
         return
 
     try:
