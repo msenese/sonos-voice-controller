@@ -33,13 +33,21 @@ Ranked by self-confidence ascending (worst first) since that's the
 single most informative signal here; other flags are shown inline so a
 sample stacking multiple problems stands out immediately.
 
-Usage: python3 analyze-label-samples.py <label> [--confidence-threshold 0.7] [--workers 5]
+Optionally restrict to samples added on/after a given date (--since
+YYYY-MM-DD) -- e.g. to check just today's batch. All the percentile-based
+checks are computed relative to whatever samples are passed in, so this
+naturally makes "duration outlier" etc. mean "relative to this batch",
+not the label's whole historical distribution.
+
+Usage: python3 analyze-label-samples.py <label> [--confidence-threshold 0.7] [--workers 5] [--since YYYY-MM-DD]
 Example: python3 analyze-label-samples.py "sonos pause"
+Example: python3 analyze-label-samples.py "unknown" --since 2026-07-31
 """
 import argparse
 import sys
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 
 import requests
 
@@ -56,7 +64,7 @@ def ei_headers():
     return {"x-api-key": cfg.EI_API_KEY}
 
 
-def list_samples(label):
+def list_samples(label, since_date=None):
     matches = []
     offset = 0
     while True:
@@ -72,7 +80,18 @@ def list_samples(label):
         if len(page) < PAGE_SIZE:
             break
         offset += PAGE_SIZE
+    if since_date is not None:
+        matches = [s for s in matches if _added_date(s.get("added")) is not None and _added_date(s.get("added")) >= since_date]
     return matches
+
+
+def _added_date(added):
+    if not added:
+        return None
+    try:
+        return datetime.strptime(added.replace("Z", "+0000"), "%Y-%m-%dT%H:%M:%S.%f%z").date()
+    except ValueError:
+        return None
 
 
 def fetch_peak_amplitude(sample_id):
@@ -117,9 +136,10 @@ def percentile(values, pct):
     return s[idx]
 
 
-def analyze_label(label, confidence_threshold, workers):
-    samples = list_samples(label)
-    print(f"Found {len(samples)} enabled {label!r} samples. Analyzing...")
+def analyze_label(label, confidence_threshold, workers, since_date=None):
+    samples = list_samples(label, since_date)
+    since_note = f" added on/after {since_date}" if since_date else ""
+    print(f"Found {len(samples)} enabled {label!r} samples{since_note}. Analyzing...")
 
     results = []
     errors = []
@@ -198,13 +218,23 @@ def main():
     parser.add_argument("label", help='e.g. "sonos play", "sonos pause", "sonos mute"')
     parser.add_argument("--confidence-threshold", type=float, default=0.7)
     parser.add_argument("--workers", type=int, default=5)
+    parser.add_argument("--since", type=str, default=None, metavar="YYYY-MM-DD",
+                         help="only analyze samples added on/after this date")
     args = parser.parse_args()
 
     if not getattr(cfg, "EI_API_KEY", None) or cfg.EI_API_KEY == "your-edge-impulse-api-key-here":
         print("EI_API_KEY is not configured in config.py. Aborting.")
         sys.exit(1)
 
-    analyze_label(args.label, args.confidence_threshold, args.workers)
+    since_date = None
+    if args.since:
+        try:
+            since_date = datetime.strptime(args.since, "%Y-%m-%d").date()
+        except ValueError:
+            print(f"--since must be YYYY-MM-DD, got {args.since!r}. Aborting.")
+            sys.exit(1)
+
+    analyze_label(args.label, args.confidence_threshold, args.workers, since_date)
 
 
 if __name__ == "__main__":
