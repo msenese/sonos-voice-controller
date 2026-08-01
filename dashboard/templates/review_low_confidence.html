@@ -100,7 +100,7 @@ function renderResults(results) {
     // peak is only present for samples that went through a peak-amplitude
     // check (e.g. arrived via the clipping scan's ?ids= link) -- omitted
     // for a plain confidence-threshold run, which never fetches it.
-    const peakNote = typeof r.peak === "number" ? ` &middot; peak ${r.peak}${r.peak >= 32000 ? " (clipping)" : ""}` : "";
+    const peakNote = typeof r.peak === "number" ? ` &middot; peak ${(r.peak / 32768 * 100).toFixed(1)}%${r.peak >= 32000 ? " (clipping)" : ""}` : "";
     return `
       <li>
         <div class="lc-top-row">
