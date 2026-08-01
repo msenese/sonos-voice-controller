@@ -886,6 +886,76 @@ _low_confidence_state = {
     "mode": "confidence",
 }
 
+# Project-wide clipping scan (all labels, not just the low-confidence
+# review's "unknown"/"noise") -- a separate, cached background job since a
+# full pass over every enabled sample takes a few minutes, too slow to run
+# on every dashboard page load. Stays cached until the next "Scan" click,
+# same pattern as the low-confidence state above.
+_clipping_lock = threading.Lock()
+_clipping_state = {
+    "running": False, "done": 0, "total": 0, "results": [], "last_run_at": None,
+}
+
+
+def _clipping_list_all_samples():
+    matches = []
+    offset = 0
+    while True:
+        r = requests.get(
+            f"{EI_API_BASE}/{cfg.EI_PROJECT_ID}/raw-data",
+            headers=ei_headers(),
+            params={"category": "all", "limit": 100, "offset": offset},
+            timeout=30,
+        )
+        r.raise_for_status()
+        page = r.json().get("samples", [])
+        matches.extend(s for s in page if not s.get("isDisabled"))
+        if len(page) < 100:
+            break
+        offset += 100
+    return matches
+
+
+def _clipping_fetch_peak(sample):
+    r = requests.get(
+        f"{EI_API_BASE}/{cfg.EI_PROJECT_ID}/raw-data/{sample['id']}",
+        headers=ei_headers(), timeout=30,
+    )
+    r.raise_for_status()
+    values = [v[0] for v in r.json()["payload"]["values"]]
+    peak = max((abs(v) for v in values), default=0)
+    return {
+        "id": sample["id"], "filename": sample["filename"], "label": sample.get("label", "?"),
+        "category": sample.get("category"), "duration_ms": sample.get("totalLengthMs"),
+        "added": sample.get("added"), "peak": peak,
+    }
+
+
+def _clipping_run():
+    with _clipping_lock:
+        _clipping_state.update(running=True, done=0, total=0, results=[])
+
+    samples = _clipping_list_all_samples()
+    with _clipping_lock:
+        _clipping_state["total"] = len(samples)
+
+    clipped = []
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = {pool.submit(_clipping_fetch_peak, s): s for s in samples}
+        for future in as_completed(futures):
+            try:
+                r = future.result()
+                if r["peak"] >= CLIP_THRESHOLD:
+                    clipped.append(r)
+            except requests.RequestException:
+                pass
+            with _clipping_lock:
+                _clipping_state["done"] += 1
+
+    clipped.sort(key=lambda r: -r["peak"])
+    with _clipping_lock:
+        _clipping_state.update(results=clipped, running=False, last_run_at=time.time())
+
 
 def _low_confidence_list_samples(label):
     matches = []
@@ -918,7 +988,7 @@ def _low_confidence_classify_one(sample):
     return {
         "id": sample["id"], "filename": sample["filename"], "label": sample["label"],
         "self_confidence": self_confidence, "top_label": top_label, "top_confidence": top_confidence,
-        "added": sample.get("added"),
+        "added": sample.get("added"), "peak": sample.get("peak"),
     }
 
 
@@ -994,7 +1064,15 @@ def _low_confidence_fetch_sample_meta(sample_id):
         headers=ei_headers(), timeout=30,
     )
     r.raise_for_status()
-    return r.json()["sample"]
+    data = r.json()
+    sample = data["sample"]
+    # Peak amplitude comes along for free here -- same response already
+    # has the raw payload, so this needs no separate request -- and lets
+    # the review UI show/sort by it regardless of what selected this
+    # sample (clipping scan or otherwise).
+    values = [v[0] for v in data["payload"]["values"]]
+    sample["peak"] = max((abs(v) for v in values), default=0)
+    return sample
 
 
 def _low_confidence_run_custom(sample_ids):
@@ -1074,6 +1152,23 @@ def api_low_confidence_run_custom():
         return jsonify({"error": "sample_ids must be a non-empty list of integers"}), 400
     threading.Thread(target=_low_confidence_run_custom, args=(sample_ids,), daemon=True).start()
     return jsonify({"started": True})
+
+
+@app.route("/api/clipping/run", methods=["POST"])
+def api_clipping_run():
+    if not ei_configured():
+        return jsonify({"error": "EI_API_KEY / EI_PROJECT_ID not configured in config.py"}), 400
+    with _clipping_lock:
+        if _clipping_state["running"]:
+            return jsonify({"error": "scan already running"}), 409
+    threading.Thread(target=_clipping_run, daemon=True).start()
+    return jsonify({"started": True})
+
+
+@app.route("/api/clipping/status")
+def api_clipping_status():
+    with _clipping_lock:
+        return jsonify(dict(_clipping_state))
 
 
 @app.route("/api/low-confidence/status")

@@ -54,6 +54,7 @@
           <option value="confidence-desc">Confidence (best first)</option>
           <option value="date-desc">Date (newest first)</option>
           <option value="date-asc">Date (oldest first)</option>
+          <option value="peak-desc">Peak amplitude (most clipped first)</option>
         </select>
       </label>
     </div>
@@ -96,13 +97,17 @@ function renderResults(results) {
       ? ` &middot; VAD: ${r.vad_suggestion === "unknown" ? "speech detected" : "no speech"}`
       : "";
     const dateNote = r.added ? ` &middot; ${new Date(r.added).toLocaleDateString()}` : "";
+    // peak is only present for samples that went through a peak-amplitude
+    // check (e.g. arrived via the clipping scan's ?ids= link) -- omitted
+    // for a plain confidence-threshold run, which never fetches it.
+    const peakNote = typeof r.peak === "number" ? ` &middot; peak ${r.peak}${r.peak >= 32000 ? " (clipping)" : ""}` : "";
     return `
       <li>
         <div class="lc-top-row">
           <span class="capture-row">
             <input type="checkbox" class="row-select" data-id="${r.id}">
             <button class="play-btn" data-id="${r.id}" title="Play">&#9654;</button>
-            <span>[${r.label}] ${formatPct(r.self_confidence)} self-confidence &middot; model leans '${r.top_label}' at ${formatPct(r.top_confidence)}${vadNote}${dateNote}</span>
+            <span>[${r.label}] ${formatPct(r.self_confidence)} self-confidence &middot; model leans '${r.top_label}' at ${formatPct(r.top_confidence)}${vadNote}${dateNote}${peakNote}</span>
           </span>
           <span class="capture-actions">
             <button class="correct" data-id="${r.id}" title="Leave this sample as-is">&check; Keep</button>
@@ -221,6 +226,7 @@ function sortResults(results, sortBy) {
     case "confidence-desc": sorted.sort((a, b) => b.self_confidence - a.self_confidence); break;
     case "date-desc": sorted.sort((a, b) => new Date(b.added || 0) - new Date(a.added || 0)); break;
     case "date-asc": sorted.sort((a, b) => new Date(a.added || 0) - new Date(b.added || 0)); break;
+    case "peak-desc": sorted.sort((a, b) => (b.peak || 0) - (a.peak || 0)); break;
   }
   return sorted;
 }
@@ -229,7 +235,10 @@ function renderSorted() {
   renderResults(sortResults(currentResults, sortSelect.value));
 }
 
-sortSelect.addEventListener("change", renderSorted);
+sortSelect.addEventListener("change", () => {
+  sortSelect.dataset.userChanged = "true";
+  renderSorted();
+});
 
 document.getElementById("select-all-checkbox").addEventListener("change", (e) => {
   document.querySelectorAll(".row-select").forEach(cb => { cb.checked = e.target.checked; });
@@ -299,6 +308,12 @@ async function pollStatus() {
     reviewStatus.textContent = `${data.results.length} sample(s) shown.`;
   }
   currentResults = data.results;
+  // "Most offensive first" for a clipping-sourced list means sorted by
+  // peak, not confidence -- flip the default the first time results with
+  // peak data show up, without overriding a choice already made by hand.
+  if (!sortSelect.dataset.userChanged && data.mode === "clipping" && currentResults.some(r => typeof r.peak === "number")) {
+    sortSelect.value = "peak-desc";
+  }
   renderSorted();
 }
 

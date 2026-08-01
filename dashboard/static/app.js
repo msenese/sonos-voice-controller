@@ -722,6 +722,75 @@ async function loadSampleCounts() {
   }
 }
 
+// --- Clipping scan (project-wide, all labels) ---
+
+const clippingStatus = document.getElementById("clipping-status");
+const clippingScanBtn = document.getElementById("clipping-scan-btn");
+const clippingReviewLink = document.getElementById("clipping-review-link");
+let clippingPollTimer = null;
+
+function renderClippingState(data) {
+  if (data.running) {
+    clippingScanBtn.disabled = true;
+    clippingStatus.textContent = data.total > 0
+      ? `Clipping: scanning... ${data.done}/${data.total}`
+      : "Clipping: looking up samples...";
+    return;
+  }
+
+  clippingScanBtn.disabled = false;
+  if (!data.last_run_at) {
+    clippingStatus.textContent = "Clipping: — (not scanned yet)";
+    clippingReviewLink.style.display = "none";
+    return;
+  }
+
+  const when = new Date(data.last_run_at * 1000).toLocaleString();
+  clippingStatus.textContent = `Clipping: ${data.results.length} sample(s) (as of ${when})`;
+  if (data.results.length > 0) {
+    // Sorted worst-first already (server sorts by peak descending), so the
+    // review page's default order matches "most offensive first" without
+    // the user needing to touch its sort dropdown.
+    const ids = data.results.map(r => r.id).join(",");
+    clippingReviewLink.href = `/review-low-confidence?ids=${ids}`;
+    clippingReviewLink.style.display = "inline-flex";
+  } else {
+    clippingReviewLink.style.display = "none";
+  }
+}
+
+async function pollClippingStatus() {
+  let data;
+  try {
+    const res = await fetch("/api/clipping/status");
+    data = await res.json();
+  } catch (e) {
+    return;
+  }
+  renderClippingState(data);
+  if (data.running) {
+    clippingPollTimer = setTimeout(pollClippingStatus, 1500);
+  }
+}
+
+clippingScanBtn.addEventListener("click", async () => {
+  clippingScanBtn.disabled = true;
+  clippingStatus.textContent = "Clipping: starting scan...";
+  try {
+    const res = await fetch("/api/clipping/run", { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+  } catch (e) {
+    clippingStatus.textContent = `Clipping: error - ${e.message}`;
+    clippingScanBtn.disabled = false;
+    return;
+  }
+  if (clippingPollTimer) clearTimeout(clippingPollTimer);
+  pollClippingStatus();
+});
+
+pollClippingStatus();
+
 const modelStatus = document.getElementById("model-status");
 const retrainBtn = document.getElementById("model-retrain");
 const buildBtn = document.getElementById("model-build");
