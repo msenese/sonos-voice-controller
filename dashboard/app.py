@@ -883,6 +883,7 @@ _low_confidence_lock = threading.Lock()
 _low_confidence_state = {
     "running": False, "done": 0, "total": 0, "results": [],
     "last_run_at": None, "threshold": LOW_CONFIDENCE_THRESHOLD_DEFAULT,
+    "mode": "confidence",
 }
 
 
@@ -946,7 +947,7 @@ def _low_confidence_vad_for(sample_id):
 
 def _low_confidence_run(threshold):
     with _low_confidence_lock:
-        _low_confidence_state.update(running=True, done=0, total=0, results=[], threshold=threshold)
+        _low_confidence_state.update(running=True, done=0, total=0, results=[], threshold=threshold, mode="confidence")
 
     samples = []
     for label in LOW_CONFIDENCE_TARGET_LABELS:
@@ -987,6 +988,56 @@ def _low_confidence_remove(sample_id):
         _low_confidence_state["results"] = [r for r in _low_confidence_state["results"] if r["id"] != sample_id]
 
 
+def _low_confidence_fetch_sample_meta(sample_id):
+    r = requests.get(
+        f"{EI_API_BASE}/{cfg.EI_PROJECT_ID}/raw-data/{sample_id}",
+        headers=ei_headers(), timeout=30,
+    )
+    r.raise_for_status()
+    return r.json()["sample"]
+
+
+def _low_confidence_run_custom(sample_ids):
+    # Shares this page's review UI (audio playback, keep/disable/relabel,
+    # sort) with the confidence-threshold flow above, but for an explicit
+    # list of sample IDs selected by some other criterion entirely (e.g.
+    # find-clipping-samples.py's output) -- self-confidence is still shown
+    # per sample since it's useful context, but it's not what selected
+    # these, so nothing here is threshold-filtered.
+    with _low_confidence_lock:
+        _low_confidence_state.update(running=True, done=0, total=len(sample_ids), results=[], mode="clipping")
+
+    samples = []
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        futures = {pool.submit(_low_confidence_fetch_sample_meta, sid): sid for sid in sample_ids}
+        for future in as_completed(futures):
+            try:
+                samples.append(future.result())
+            except requests.RequestException:
+                pass
+            with _low_confidence_lock:
+                _low_confidence_state["done"] += 1
+
+    flagged = []
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        futures = {pool.submit(_low_confidence_classify_one, s): s for s in samples}
+        for future in as_completed(futures):
+            try:
+                flagged.append(future.result())
+            except requests.RequestException:
+                pass
+
+    flagged.sort(key=lambda r: r["self_confidence"])
+
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        vad_futures = {pool.submit(_low_confidence_vad_for, r["id"]): r for r in flagged}
+        for future in as_completed(vad_futures):
+            vad_futures[future]["vad_suggestion"] = future.result()
+
+    with _low_confidence_lock:
+        _low_confidence_state.update(results=flagged, running=False, last_run_at=time.time())
+
+
 @app.route("/review-low-confidence")
 def review_low_confidence_page():
     return render_template("review_low_confidence.html", labels=LABELS)
@@ -1007,6 +1058,21 @@ def api_low_confidence_run():
     if not (0.0 <= threshold <= 1.0):
         return jsonify({"error": "threshold must be between 0 and 1"}), 400
     threading.Thread(target=_low_confidence_run, args=(threshold,), daemon=True).start()
+    return jsonify({"started": True})
+
+
+@app.route("/api/low-confidence/run-custom", methods=["POST"])
+def api_low_confidence_run_custom():
+    if not ei_configured():
+        return jsonify({"error": "EI_API_KEY / EI_PROJECT_ID not configured in config.py"}), 400
+    with _low_confidence_lock:
+        if _low_confidence_state["running"]:
+            return jsonify({"error": "analysis already running"}), 409
+    body = request.get_json(silent=True) or {}
+    sample_ids = body.get("sample_ids")
+    if not isinstance(sample_ids, list) or not sample_ids or not all(isinstance(i, int) for i in sample_ids):
+        return jsonify({"error": "sample_ids must be a non-empty list of integers"}), 400
+    threading.Thread(target=_low_confidence_run_custom, args=(sample_ids,), daemon=True).start()
     return jsonify({"started": True})
 
 

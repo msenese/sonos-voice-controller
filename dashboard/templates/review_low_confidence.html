@@ -293,8 +293,10 @@ async function pollStatus() {
   runBtn.disabled = false;
   if (data.last_run_at) {
     const when = new Date(data.last_run_at * 1000).toLocaleString();
-    analysisStatus.textContent = `Last run: ${when}, threshold ${formatPct(data.threshold)}.`;
-    reviewStatus.textContent = `${data.results.length} sample(s) flagged.`;
+    analysisStatus.textContent = data.mode === "clipping"
+      ? `Last run: ${when}, showing a fixed list of samples (not threshold-filtered).`
+      : `Last run: ${when}, threshold ${formatPct(data.threshold)}.`;
+    reviewStatus.textContent = `${data.results.length} sample(s) shown.`;
   }
   currentResults = data.results;
   renderSorted();
@@ -320,6 +322,38 @@ runBtn.addEventListener("click", async () => {
   if (pollTimer) clearTimeout(pollTimer);
   pollStatus();
 });
+
+// --- Custom sample list mode (?ids=1,2,3 in the URL) ---
+//
+// For reviewing a fixed set of sample IDs selected by some other script
+// (e.g. find-clipping-samples.py) rather than by this page's own
+// confidence-threshold run. Shares the same review UI (audio, keep/
+// disable/relabel, sort) since those act per-sample-id regardless of how
+// the sample was selected -- only the analysis step differs.
+const idsParam = new URLSearchParams(window.location.search).get("ids");
+if (idsParam) {
+  const sampleIds = idsParam.split(",").map(s => Number(s.trim())).filter(n => Number.isInteger(n));
+  if (sampleIds.length > 0) {
+    (async () => {
+      runBtn.disabled = true;
+      analysisStatus.textContent = `Starting custom review of ${sampleIds.length} sample(s)...`;
+      try {
+        const res = await fetch("/api/low-confidence/run-custom", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sample_ids: sampleIds }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error);
+      } catch (e) {
+        analysisStatus.textContent = `Error: ${e.message}`;
+        runBtn.disabled = false;
+        return;
+      }
+      pollStatus();
+    })();
+  }
+}
 
 // --- Disabled samples (re-enable) ---
 
