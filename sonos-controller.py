@@ -28,6 +28,7 @@ detection_history = []
 connection_status = "disconnected"
 is_muted = None
 is_paused = None
+_last_voice_trigger_time = None  # set by handle_voice_command(), read by listen() on reconnect
 
 _config_mtime = os.path.getmtime(cfg.__file__)
 
@@ -275,14 +276,20 @@ async def handle_voice_command():
     # Runs as an independent background task (not awaited inline with the
     # mute toggle) so a slow transcription/LLM round trip on the M1 never
     # delays processing of the next detection message off the websocket.
+    global _last_voice_trigger_time
     if not getattr(cfg, "VOICE_ASSISTANT_SECRET", None) or cfg.VOICE_ASSISTANT_SECRET == "your-voice-assistant-shared-secret-here":
         return
+
+    t_start = time.time()
+    _last_voice_trigger_time = t_start  # picked up by listen()'s reconnect log
 
     try:
         wav_bytes = await asyncio.to_thread(_capture_voice_command_wav)
     except (subprocess.SubprocessError, OSError) as e:
         print(f"[VOICE] Could not capture follow-up audio: {e}")
         return
+    t_captured = time.time()
+    print(f"[TIMING] Capture (stop ei-runner + record {VOICE_CAPTURE_SECONDS}s + restart ei-runner): {t_captured - t_start:.1f}s")
 
     try:
         result = await asyncio.to_thread(_send_to_voice_assistant, wav_bytes)
@@ -290,6 +297,9 @@ async def handle_voice_command():
         print(f"[VOICE] Assistant request failed: {e}")
         await flash_color(30, 0, 0)
         return
+    t_responded = time.time()
+    print(f"[TIMING] Assistant round trip (transcribe + LLM + HA): {t_responded - t_captured:.1f}s")
+    print(f"[TIMING] Total (trigger to action resolved): {t_responded - t_start:.1f}s")
 
     print(
         f"[VOICE] transcript={result.get('transcript')!r} action={result.get('action')} "
@@ -442,7 +452,7 @@ async def poll_player_state():
 
 
 async def listen():
-    global last_trigger_time, consecutive_count, latest_scores, connection_status, led_override
+    global last_trigger_time, consecutive_count, latest_scores, connection_status, led_override, _last_voice_trigger_time
     while True:
         chase_task = None
         try:
@@ -454,6 +464,11 @@ async def listen():
                 chase_task.cancel()
                 led_override = False
                 print("[EI] Connected to Edge Impulse runner")
+                if _last_voice_trigger_time is not None:
+                    blackout = time.time() - _last_voice_trigger_time
+                    if blackout < 60:  # ignore this on unrelated startup/reconnects
+                        print(f"[TIMING] Full detection blackout (trigger to reconnected): {blackout:.1f}s")
+                    _last_voice_trigger_time = None
                 connection_status = "connected"
                 async for message in ws:
                     reload_config_if_changed()
