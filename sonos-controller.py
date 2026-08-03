@@ -28,7 +28,6 @@ detection_history = []
 connection_status = "disconnected"
 is_muted = None
 is_paused = None
-_last_voice_trigger_time = None  # set by handle_voice_command(), read by listen() on reconnect
 
 _config_mtime = os.path.getmtime(cfg.__file__)
 
@@ -209,108 +208,6 @@ def post_capture(label, score):
         pass
 
 
-# Temporary stand-in for a not-yet-trained wake word: "sonos mute" doubles as
-# a trigger to capture a few seconds of follow-up speech and relay it to an
-# external voice-assistant HTTP endpoint on the LAN.
-#
-# Buffer mode's relay pipeline (block chunking -> queue -> ALSA loopback ->
-# sox -> ei-runner's inference) proved too unreliable in practice for live
-# use -- repeated real-world testing got zero clean "sonos mute" detections
-# in a row despite the trigger word being said correctly, where Classic
-# mode's direct mic read is consistently fast and reliable. So instead of
-# tapping audio-buffer.py's live stream (which needs Buffer mode running
-# all the time just for this one feature), this briefly stops ei-runner to
-# free the mic, captures directly with arecord, then restarts ei-runner --
-# a full, if brief, detection blackout during the capture+restart window,
-# rather than a permanent responsiveness hit on every command the rest of
-# the time. Only safe to do from in here because sonos-controller.service
-# no longer Requires=ei-runner.service (see services/sonos-controller.service)
-# -- otherwise stopping it would cascade-stop this very process too.
-VOICE_CAPTURE_SECONDS = 5
-VOICE_CAPTURE_DEVICE = "plughw:wm8960soundcard,0"  # matches audio-buffer.py's INPUT_DEVICE_ARECORD
-VOICE_CAPTURE_TMP_PATH = "/tmp/voice_command_capture.wav"
-EI_RUNNER_SERVICE = "ei-runner.service"
-VOICE_ASSISTANT_TIMEOUT = 20  # transcription + local LLM + HA round trip
-
-
-def _capture_voice_command_wav():
-    subprocess.run(["systemctl", "stop", EI_RUNNER_SERVICE], check=True, timeout=15)
-    try:
-        # A brief pause after the stop call returns -- systemd only confirms
-        # the unit's reported as stopped, not that sox has actually released
-        # the ALSA device yet, and arecord failing to open it immediately
-        # after would be a worse failure mode than a short, harmless wait.
-        time.sleep(0.5)
-        subprocess.run(
-            [
-                "arecord", "-D", VOICE_CAPTURE_DEVICE,
-                "-f", "S16_LE", "-r", "16000", "-c", "1",
-                "-d", str(VOICE_CAPTURE_SECONDS), "-t", "wav",
-                VOICE_CAPTURE_TMP_PATH,
-            ],
-            check=True, timeout=VOICE_CAPTURE_SECONDS + 5,
-        )
-        with open(VOICE_CAPTURE_TMP_PATH, "rb") as f:
-            return f.read()
-    finally:
-        # Always restore detection, even if the capture itself failed.
-        subprocess.run(["systemctl", "start", EI_RUNNER_SERVICE], check=False, timeout=15)
-        try:
-            os.remove(VOICE_CAPTURE_TMP_PATH)
-        except OSError:
-            pass
-
-
-def _send_to_voice_assistant(wav_bytes):
-    response = requests.post(
-        cfg.VOICE_ASSISTANT_URL,
-        headers={"X-Voice-Secret": cfg.VOICE_ASSISTANT_SECRET},
-        files={"audio": ("command.wav", wav_bytes, "audio/wav")},
-        timeout=VOICE_ASSISTANT_TIMEOUT,
-    )
-    response.raise_for_status()
-    return response.json()
-
-
-async def handle_voice_command():
-    # Runs as an independent background task (not awaited inline with the
-    # mute toggle) so a slow transcription/LLM round trip on the M1 never
-    # delays processing of the next detection message off the websocket.
-    global _last_voice_trigger_time
-    if not getattr(cfg, "VOICE_ASSISTANT_SECRET", None) or cfg.VOICE_ASSISTANT_SECRET == "your-voice-assistant-shared-secret-here":
-        return
-
-    t_start = time.time()
-    _last_voice_trigger_time = t_start  # picked up by listen()'s reconnect log
-
-    try:
-        wav_bytes = await asyncio.to_thread(_capture_voice_command_wav)
-    except (subprocess.SubprocessError, OSError) as e:
-        print(f"[VOICE] Could not capture follow-up audio: {e}")
-        return
-    t_captured = time.time()
-    print(f"[TIMING] Capture (stop ei-runner + record {VOICE_CAPTURE_SECONDS}s + restart ei-runner): {t_captured - t_start:.1f}s")
-
-    try:
-        result = await asyncio.to_thread(_send_to_voice_assistant, wav_bytes)
-    except requests.RequestException as e:
-        print(f"[VOICE] Assistant request failed: {e}")
-        await flash_color(30, 0, 0)
-        return
-    t_responded = time.time()
-    print(f"[TIMING] Assistant round trip (transcribe + LLM + HA): {t_responded - t_captured:.1f}s")
-    print(f"[TIMING] Total (trigger to action resolved): {t_responded - t_start:.1f}s")
-
-    print(
-        f"[VOICE] transcript={result.get('transcript')!r} action={result.get('action')} "
-        f"ha_success={result.get('ha_success')} dry_run={result.get('dry_run')}"
-    )
-    if result.get("ha_success"):
-        await flash_green()
-    else:
-        await flash_color(30, 20, 0)
-
-
 def _set_muted(muted):
     # Sets an absolute mute state rather than toggling -- used where the
     # desired end state is known (e.g. "sonos play" auto-unmuting), where
@@ -448,11 +345,16 @@ async def poll_player_state():
             write_state()
         except Exception as e:
             print(f"[HA] Poll error: {e}")
-        await asyncio.sleep(5)
+        # Was 5s -- the mute threshold itself (volume_level <= 0.02) is
+        # correct, but a 5s poll meant the LED could lag a real volume
+        # change by up to 5 seconds, which reads as "it doesn't turn back
+        # until ~6%" if you're raising volume gradually and glancing at the
+        # LED mid-climb, rather than an actual threshold bug.
+        await asyncio.sleep(1)
 
 
 async def listen():
-    global last_trigger_time, consecutive_count, latest_scores, connection_status, led_override, _last_voice_trigger_time
+    global last_trigger_time, consecutive_count, latest_scores, connection_status, led_override
     while True:
         chase_task = None
         try:
@@ -464,11 +366,6 @@ async def listen():
                 chase_task.cancel()
                 led_override = False
                 print("[EI] Connected to Edge Impulse runner")
-                if _last_voice_trigger_time is not None:
-                    blackout = time.time() - _last_voice_trigger_time
-                    if blackout < 60:  # ignore this on unrelated startup/reconnects
-                        print(f"[TIMING] Full detection blackout (trigger to reconnected): {blackout:.1f}s")
-                    _last_voice_trigger_time = None
                 connection_status = "connected"
                 async for message in ws:
                     reload_config_if_changed()
@@ -509,12 +406,6 @@ async def listen():
                                             "score": score,
                                             "timestamp": now,
                                         })
-                                        if label == "sonos mute":
-                                            # Fire-and-forget: this can take several
-                                            # seconds (capture + transcription + LLM),
-                                            # and must not delay handling the next
-                                            # detection off the websocket.
-                                            asyncio.create_task(handle_voice_command())
                                         await asyncio.to_thread(trigger_ha, label)
                                         await asyncio.to_thread(post_capture, label, score)
                                         await flash_green()

@@ -1,12 +1,9 @@
 [Unit]
 Description=Sonos Voice Controller
 After=network.target ei-runner.service
-# No Requires=ei-runner.service (removed) -- the voice-command relay stops
-# and restarts ei-runner itself from within sonos-controller.py to briefly
-# free the mic for a direct capture (see _capture_voice_command_wav). With
-# Requires= in place, that stop would have cascade-stopped this service
-# too, killing the very process trying to do the capture. After= alone
-# keeps ei-runner starting first on boot without that cascade.
+# No Requires=ei-runner.service -- After= alone keeps ei-runner starting
+# first on boot, without hard-tying this service's lifecycle to it (e.g. an
+# ei-runner restart shouldn't cascade-stop this one too).
 
 [Service]
 ExecStart=/usr/bin/python3 -u /home/msenese/sonos-controller.py

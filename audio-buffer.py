@@ -86,6 +86,8 @@ _last_input_time = None
 _last_output_time = None
 _input_restart_count = 0
 _output_status_count = 0
+_output_pull_count = 0
+_output_miss_count = 0
 
 # Forward-looking capture (e.g. "record the next N seconds of a spoken
 # command after a wake trigger") -- distinct from the ring buffer above,
@@ -169,14 +171,16 @@ def input_reader_thread():
 
 
 def output_callback(outdata, frames, time_info, status):
-    global _last_output_time, _output_status_count
+    global _last_output_time, _output_status_count, _output_pull_count, _output_miss_count
     if status:
         _output_status_count += 1
         print(f"[AUDIO] Output status: {status}")
     _last_output_time = time.time()
     try:
         data = _forward_queue.get_nowait()
+        _output_pull_count += 1
     except queue.Empty:
+        _output_miss_count += 1
         outdata[:, 0] = 0
         return
     n = min(len(data), frames)
@@ -209,6 +213,9 @@ def health():
         "forward_queue_size": _forward_queue.qsize(),
         "input_restart_count": _input_restart_count,
         "output_status_events": _output_status_count,
+        "output_pull_count": _output_pull_count,
+        "output_miss_count": _output_miss_count,
+        "output_miss_rate": round(_output_miss_count / max(1, _output_pull_count + _output_miss_count), 4),
     })
 
 
@@ -322,6 +329,21 @@ if __name__ == "__main__":
     output_device_index = find_output_device_index(OUTPUT_DEVICE_NAME, OUTPUT_DEVICE_INDEX)
     print(f"[AUDIO] Forwarding output device: {sd.query_devices(output_device_index)['name']}")
 
+    # Input has to start (and build up a real backlog) BEFORE the output
+    # stream starts, not after -- PortAudio requests several periods' worth
+    # of data in a burst right when a stream starts, and starting output
+    # first (the previous order) meant every one of those initial requests
+    # hit an empty queue and got silence instead of real audio. Confirmed
+    # directly: a standalone test of this exact queue+callback mechanism
+    # showed 16 of 56 callback pulls (29%) landing on an empty queue when
+    # output started before input was feeding it -- a strong candidate for
+    # the dropped-audio/reduced-peak signal seen in Buffer mode's relayed
+    # captures vs. a direct mic capture of the same moment.
+    threading.Thread(target=input_reader_thread, daemon=True).start()
+    while _forward_queue.qsize() < 10:
+        time.sleep(0.05)
+    print(f"[AUDIO] Input backlog ready ({_forward_queue.qsize()} blocks queued), starting output")
+
     output_stream = sd.OutputStream(
         device=output_device_index,
         channels=CHANNELS,
@@ -331,8 +353,6 @@ if __name__ == "__main__":
         callback=output_callback,
     )
     output_stream.start()
-
-    threading.Thread(target=input_reader_thread, daemon=True).start()
 
     # threaded=True matters now beyond convenience: /capture-forward blocks
     # its own request thread for several seconds, and without this the

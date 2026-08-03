@@ -26,11 +26,3 @@ EI_PROJECT_ID = "your-project-id-here"
 # everything else the dashboard does). Keeping it separate from EI_API_KEY
 # limits which action can use the broader-privilege key.
 EI_ADMIN_API_KEY = "your-edge-impulse-admin-api-key-here"
-
-# Temporary stand-in for a not-yet-trained wake word: while VOICE_ASSISTANT_SECRET
-# is left as the placeholder below, "sonos mute" triggers keep their existing
-# mute-toggle behavior only. Once set, "sonos mute" ALSO captures a few seconds
-# of follow-up audio (Buffer mode only -- see audio-buffer.py's /capture-forward)
-# and relays it to an external voice-assistant HTTP endpoint on the LAN.
-VOICE_ASSISTANT_URL = "http://192.168.50.212:8420/voice"
-VOICE_ASSISTANT_SECRET = "your-voice-assistant-shared-secret-here"
