@@ -55,16 +55,33 @@ Config values (`THRESHOLD`, `SONOS_PLAY_THRESHOLD`, `COOLDOWN`,
 fly — the controller checks the file's mtime on every message, so changes
 made from the dashboard take effect within a moment, no restart needed.
 
-### Why `ei-runner.service` pins `--microphone hw:1,0`
+### Why `ei-runner.service` pins `--microphone hw:$CARD,0`
 
 Omitting `--microphone` lets the runner auto-select a capture device, which
-works fine as long as there are only the two real ALSA capture devices
-(`hw:0,0`, `hw:1,0`). Loading the `snd-aloop` kernel module (used for
-loopback experiments, see below) adds a third device, and auto-select
-silently started picking that one instead of the real mic — producing zero
-audio and taking the whole detection pipeline down with no obvious error.
-Pinning the device explicitly makes this deterministic regardless of what
-else is loaded on the system. Don't remove this flag.
+works fine as long as there are only the two real ALSA capture devices.
+Loading the `snd-aloop` kernel module (used for loopback experiments, see
+below) adds a third device, and auto-select silently started picking that
+one instead of the real mic — producing zero audio and taking the whole
+detection pipeline down with no obvious error. Pinning the device explicitly
+makes this deterministic regardless of what else is loaded on the system.
+Don't remove this flag.
+
+Two things confirmed live during a from-scratch rebuild, both already
+reflected in `services/ei-runner.service` — worth knowing if you ever hand-edit it:
+
+- **`edge-impulse-linux-runner` rejects named ALSA addressing outright.**
+  `--microphone hw:wm8960soundcard,0` fails with *"cannot find microphones
+  with that name"* — it only accepts numeric `hw:N,0` matching its own
+  enumeration. Card *numbers* aren't stable across reboots (load order can
+  shift them — confirmed both `hw:0,0`/`hw:1,0` swap depending on what's
+  loaded), so the unit resolves the current number for the `wm8960soundcard`
+  card id at each start via `grep -oP` against `/proc/asound/cards`, rather
+  than hardcoding a number.
+- Systemd logs `Ignoring unknown escape sequences` for that `grep -oP`
+  pattern (the `\K`/`\s`/`\[` inside it) on every start. This is cosmetic —
+  confirmed live that the command still resolves and runs correctly despite
+  the warning — but it's noisy enough in the journal to be worth knowing
+  it's not an actual failure.
 
 ### Audio Capture Mode (Off / On)
 
@@ -108,9 +125,22 @@ entry) — add one if you want On mode to survive a reboot without a manual
 
 Assumes a fresh Raspberry Pi OS install (flashed via Raspberry Pi Imager,
 SSH enabled, on the network) with the ReSpeaker/WM8960 HAT physically
-attached, and Node.js installed (needed for the Edge Impulse CLI below).
+attached. Node.js is **not** preinstalled on a stock image — installed
+below.
 
-0. Install the WM8960 audio driver and the Edge Impulse CLI.
+0. Enable SPI (needed for the APA102 LEDs on `/dev/spidev0.0`) — it's
+   present but commented out in a fresh image's `config.txt`, so
+   `sonos-controller.py` fails immediately with `FileNotFoundError` on
+   `spi.open(0, 0)` until this is done:
+
+   ```bash
+   ssh msenese@192.168.50.99 "sudo sed -i 's/^#dtparam=spi=on/dtparam=spi=on/' /boot/firmware/config.txt && sudo reboot"
+   ```
+
+   Confirm after reboot: `ssh msenese@192.168.50.99 "ls /dev/spidev0.0"`
+   should exist.
+
+1. Install the WM8960 audio driver, Node.js, and the Edge Impulse CLI.
 
    The HAT needs an out-of-tree DKMS kernel module — it's not in mainline
    and won't work by just loading a stock overlay. This repo vendors a
@@ -137,14 +167,40 @@ attached, and Node.js installed (needed for the Edge Impulse CLI below).
    You should see `card 1: wm8960soundcard` in both listings, and
    `wm8960-soundcard/1.0, ..., installed` from `dkms status`.
 
+   Install Node.js (not on a stock image) and `sox` (the runner shells out
+   to it for audio capture — without it, `ei-runner.service` starts and
+   immediately fails with `Failed to run impulse Missing "sox" in PATH`):
+
+   ```bash
+   ssh msenese@192.168.50.99 "sudo apt-get install -y nodejs npm sox"
+   ```
+
    Then install the Edge Impulse CLI (provides `edge-impulse-linux-runner`,
    used by `ei-runner.service`):
 
    ```bash
-   ssh msenese@192.168.50.99 "npm install -g edge-impulse-linux --unsafe-perm"
+   ssh msenese@192.168.50.99 "sudo npm install -g edge-impulse-linux --unsafe-perm"
    ```
 
-1. Copy `config.example.py` to `config.py` and fill in your real values:
+   `npm` installs the binary to `/usr/local/bin/edge-impulse-linux-runner`,
+   but `services/ei-runner.service` calls `/usr/bin/edge-impulse-linux-runner`
+   — symlink it, or `ei-runner.service` fails with `status=203/EXEC`:
+
+   ```bash
+   ssh msenese@192.168.50.99 "sudo ln -sf \$(which edge-impulse-linux-runner) /usr/bin/edge-impulse-linux-runner"
+   ```
+
+   Finally, install the Python dependencies (there's no `requirements.txt`
+   yet — every service invokes plain `/usr/bin/python3`, no venv, so these
+   need to go in system-wide; Debian Trixie blocks a plain `pip3 install`
+   with an externally-managed-environment error, hence `--break-system-packages`,
+   which is the documented escape hatch for exactly this single-purpose-device case):
+
+   ```bash
+   ssh msenese@192.168.50.99 "sudo pip3 install websockets requests RPi.GPIO spidev flask numpy onnxruntime sounddevice --break-system-packages"
+   ```
+
+2. Copy `config.example.py` to `config.py` and fill in your real values:
 
    ```bash
    cp config.example.py config.py
@@ -167,7 +223,7 @@ attached, and Node.js installed (needed for the Edge Impulse CLI below).
    `config.py` is gitignored — never commit it. On the Pi it should be
    `chmod 600` (owner read/write only) since it holds live credentials.
 
-2. Deploy to the Pi — including the model file itself, which
+3. Deploy to the Pi — including the model file itself, which
    `ei-runner.service` won't start without:
 
    ```bash
@@ -175,10 +231,10 @@ attached, and Node.js installed (needed for the Edge Impulse CLI below).
    scp sonos-controller.py msenese@192.168.50.99:/home/msenese/
    scp -r dashboard/ msenese@192.168.50.99:/home/msenese/
    scp models/sonos-model-current.eim msenese@192.168.50.99:/home/msenese/sonos-model.eim
-   ssh msenese@192.168.50.99 "chmod +x /home/msenese/sonos-model.eim"
+   ssh msenese@192.168.50.99 "chmod +x /home/msenese/sonos-model.eim && chmod 600 /home/msenese/config.py"
    ```
 
-3. Install the systemd units (first time only):
+4. Install the systemd units (first time only):
 
    ```bash
    scp services/*.service msenese@192.168.50.99:/tmp/
@@ -191,12 +247,16 @@ attached, and Node.js installed (needed for the Edge Impulse CLI below).
    until you switch Audio Capture Mode On from the dashboard — don't
    `enable --now` it here.
 
-4. Install the sudoers rules the dashboard needs (restarting services and
-   switching Audio Capture Mode):
+5. Install the sudoers rules the dashboard needs (restarting services and
+   switching Audio Capture Mode). **`sudo mv` alone leaves the file owned
+   by your user, not root** — `visudo -c` will report `wrong owner (uid,
+   gid) should be (0, 0)` and sudo will silently ignore the file until
+   it's `chown`'d:
 
    ```bash
    scp services/sonos-dashboard.sudoers msenese@192.168.50.99:/tmp/
    ssh msenese@192.168.50.99 "sudo mv /tmp/sonos-dashboard.sudoers /etc/sudoers.d/sonos-dashboard \
+     && sudo chown root:root /etc/sudoers.d/sonos-dashboard \
      && sudo chmod 440 /etc/sudoers.d/sonos-dashboard \
      && sudo visudo -c"
    ```
@@ -205,13 +265,13 @@ attached, and Node.js installed (needed for the Edge Impulse CLI below).
    a different user on your box. `sonos-controller.service` runs as root
    (needs SPI/GPIO access); the other services run as this user.
 
-5. Restart after future code changes:
+6. Restart after future code changes:
 
    ```bash
    ssh msenese@192.168.50.99 "sudo systemctl restart ei-runner.service sonos-controller.service sonos-dashboard.service"
    ```
 
-6. Set up the git-archive auto-push clone (optional, but the dashboard's
+7. Set up the git-archive auto-push clone (optional, but the dashboard's
    Retrain & Deploy flow silently no-ops the archive step without it —
    see `archive_model_to_git()` in `dashboard/app.py`, which requires
    `~/git-archive/sonos-voice-controller` to already exist on the Pi as a
@@ -235,6 +295,10 @@ attached, and Node.js installed (needed for the Edge Impulse CLI below).
      IdentityFile ~/.ssh/sonos_deploy_key
      IdentitiesOnly yes
    EOF
+   chmod 600 ~/.ssh/config
+   # A fresh Pi has never talked to GitHub over SSH before -- without this,
+   # the clone below fails with 'Host key verification failed'.
+   ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
    mkdir -p ~/git-archive
    git clone git@github.com-sonos-archive:msenese/sonos-voice-controller.git ~/git-archive/sonos-voice-controller"
    ```

@@ -5,7 +5,14 @@ After=network.target sound.target
 [Service]
 User=msenese
 ExecStartPre=/bin/sh -c 'grep -q wm8960soundcard /proc/asound/cards || (echo "ei-runner: wm8960 sound card not found in /proc/asound/cards" >&2; exit 1)'
-ExecStart=/usr/bin/edge-impulse-linux-runner --microphone hw:wm8960soundcard,0 --model-file /home/msenese/sonos-model.eim --disable-camera
+# edge-impulse-linux-runner rejects named ALSA addressing outright (confirmed
+# live: "cannot find microphones with that name" for --microphone
+# hw:wm8960soundcard,0) -- it only accepts numeric hw:N,0 matching its own
+# enumeration. Card *numbers* aren't stable across reboots (load order can
+# shift them), so resolve the current number for this card id right before
+# starting, rather than hardcoding hw:1,0 -- same technique as
+# dashboard/app.py's _build_ei_runner_unit().
+ExecStart=/bin/sh -c 'CARD=$(grep -oP "^\s*\K[0-9]+(?=.*\[wm8960soundcard)" /proc/asound/cards); exec /usr/bin/edge-impulse-linux-runner --microphone "hw:$CARD,0" --model-file /home/msenese/sonos-model.eim --disable-camera'
 Restart=always
 RestartSec=5
 
