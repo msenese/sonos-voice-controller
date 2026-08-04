@@ -106,6 +106,44 @@ entry) — add one if you want On mode to survive a reboot without a manual
 
 ## Setup
 
+Assumes a fresh Raspberry Pi OS install (flashed via Raspberry Pi Imager,
+SSH enabled, on the network) with the ReSpeaker/WM8960 HAT physically
+attached, and Node.js installed (needed for the Edge Impulse CLI below).
+
+0. Install the WM8960 audio driver and the Edge Impulse CLI.
+
+   The HAT needs an out-of-tree DKMS kernel module — it's not in mainline
+   and won't work by just loading a stock overlay. This repo vendors a
+   known-working copy at [`driver/wm8960-soundcard-1.0/`](driver/wm8960-soundcard-1.0/)
+   (originally from
+   [`github.com/waveshare/WM8960-Audio-HAT`](https://github.com/waveshare/WM8960-Audio-HAT),
+   pulled from `/usr/src/wm8960-soundcard-1.0` on a working Pi — keep this
+   vendored copy even if upstream changes, since it's confirmed to build
+   against the exact kernel this project runs on):
+
+   ```bash
+   scp -r driver/wm8960-soundcard-1.0 msenese@192.168.50.99:/tmp/
+   ssh msenese@192.168.50.99 "cd /tmp/wm8960-soundcard-1.0 && sudo ./install.sh && sudo reboot"
+   ```
+
+   After it reboots, confirm the card is up (`dtoverlay=wm8960-soundcard`
+   and `dtoverlay=i2s-mmap` should both already be in
+   `/boot/firmware/config.txt` — `install.sh` adds them):
+
+   ```bash
+   ssh msenese@192.168.50.99 "aplay -l && arecord -l && sudo dkms status"
+   ```
+
+   You should see `card 1: wm8960soundcard` in both listings, and
+   `wm8960-soundcard/1.0, ..., installed` from `dkms status`.
+
+   Then install the Edge Impulse CLI (provides `edge-impulse-linux-runner`,
+   used by `ei-runner.service`):
+
+   ```bash
+   ssh msenese@192.168.50.99 "npm install -g edge-impulse-linux --unsafe-perm"
+   ```
+
 1. Copy `config.example.py` to `config.py` and fill in your real values:
 
    ```bash
@@ -129,12 +167,15 @@ entry) — add one if you want On mode to survive a reboot without a manual
    `config.py` is gitignored — never commit it. On the Pi it should be
    `chmod 600` (owner read/write only) since it holds live credentials.
 
-2. Deploy to the Pi:
+2. Deploy to the Pi — including the model file itself, which
+   `ei-runner.service` won't start without:
 
    ```bash
    scp config.py msenese@192.168.50.99:/home/msenese/
    scp sonos-controller.py msenese@192.168.50.99:/home/msenese/
    scp -r dashboard/ msenese@192.168.50.99:/home/msenese/
+   scp models/sonos-model-current.eim msenese@192.168.50.99:/home/msenese/sonos-model.eim
+   ssh msenese@192.168.50.99 "chmod +x /home/msenese/sonos-model.eim"
    ```
 
 3. Install the systemd units (first time only):
@@ -168,6 +209,34 @@ entry) — add one if you want On mode to survive a reboot without a manual
 
    ```bash
    ssh msenese@192.168.50.99 "sudo systemctl restart ei-runner.service sonos-controller.service sonos-dashboard.service"
+   ```
+
+6. Set up the git-archive auto-push clone (optional, but the dashboard's
+   Retrain & Deploy flow silently no-ops the archive step without it —
+   see `archive_model_to_git()` in `dashboard/app.py`, which requires
+   `~/git-archive/sonos-voice-controller` to already exist on the Pi as a
+   clone with push access):
+
+   ```bash
+   # Generate a deploy key ON THE PI (so the private key never leaves it):
+   ssh msenese@192.168.50.99 "ssh-keygen -t ed25519 -f ~/.ssh/sonos_deploy_key -N '' -C sonos-pi-archive"
+   ssh msenese@192.168.50.99 "cat ~/.ssh/sonos_deploy_key.pub"
+   ```
+
+   Add that public key as a **deploy key with write access** on the
+   `msenese/sonos-voice-controller` GitHub repo (Settings → Deploy keys →
+   Add deploy key). Then:
+
+   ```bash
+   ssh msenese@192.168.50.99 "cat >> ~/.ssh/config <<'EOF'
+   Host github.com-sonos-archive
+     HostName github.com
+     User git
+     IdentityFile ~/.ssh/sonos_deploy_key
+     IdentitiesOnly yes
+   EOF
+   mkdir -p ~/git-archive
+   git clone git@github.com-sonos-archive:msenese/sonos-voice-controller.git ~/git-archive/sonos-voice-controller"
    ```
 
 ## Dashboard
