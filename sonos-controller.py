@@ -332,7 +332,12 @@ def _fetch_player_state():
     attributes = state.get("attributes", {})
     volume_muted = attributes.get("is_volume_muted", False)
     volume_level = attributes.get("volume_level", 1.0)
-    muted = bool(volume_muted) or volume_level <= 0.02
+    # 0.01 rather than 0.02 -- volume changes from the Sonos app/HA move in
+    # 0.02 increments, so a real "quiet but on" level like 2% was landing
+    # exactly on the old threshold and reading as muted (purple LED) despite
+    # audibly playing. 0.01 sits strictly between 0% (true silence) and any
+    # real increment, so it only catches actual zero.
+    muted = bool(volume_muted) or volume_level <= 0.01
     paused = state.get("state") == "paused"
     return muted, paused
 
@@ -345,9 +350,8 @@ async def poll_player_state():
             write_state()
         except Exception as e:
             print(f"[HA] Poll error: {e}")
-        # Was 5s -- the mute threshold itself (volume_level <= 0.02) is
-        # correct, but a 5s poll meant the LED could lag a real volume
-        # change by up to 5 seconds, which reads as "it doesn't turn back
+        # Was 5s -- a 5s poll meant the LED could lag a real volume change
+        # by up to 5 seconds, which used to read as "it doesn't turn back
         # until ~6%" if you're raising volume gradually and glancing at the
         # LED mid-climb, rather than an actual threshold bug.
         await asyncio.sleep(1)

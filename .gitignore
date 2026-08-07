@@ -15,3 +15,6 @@ sample_counts_baseline.json
 /sonos-model-previous.eim
 /sonos-model.meta.json
 /sonos-model-previous.meta.json
+
+# Full raw SD-card images -- multi-GB, not something git should ever carry.
+/pi-backups/

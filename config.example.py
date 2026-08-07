@@ -7,7 +7,11 @@ THRESHOLD = 0.92
 SONOS_PLAY_THRESHOLD = 0.85
 SONOS_MUTE_THRESHOLD = 0.9
 COOLDOWN = 3.0
-CONSECUTIVE_REQUIRED = 2
+# The model's Performance Calibration emits one isolated high-confidence
+# window per utterance, not a sustained run -- requiring more than 1 here
+# means real detections get silently dropped waiting for a second window
+# that never comes. Confirmed live: 1 is reliable, 2 misses real commands.
+CONSECUTIVE_REQUIRED = 1
 
 SONOS_PAUSE_ENABLED = True
 SONOS_PLAY_ENABLED = True
