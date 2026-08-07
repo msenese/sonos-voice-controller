@@ -303,6 +303,17 @@ below.
    git clone git@github.com-sonos-archive:msenese/sonos-voice-controller.git ~/git-archive/sonos-voice-controller"
    ```
 
+   Then set a git identity **scoped to this clone** (a fresh Pi has none —
+   without this, `archive_model_to_git()`'s commit step fails silently
+   every time, but `git add` still succeeds, so model files just pile up
+   staged-and-uncommitted for days before anyone notices):
+
+   ```bash
+   ssh msenese@192.168.50.99 "cd ~/git-archive/sonos-voice-controller && \
+     git config user.name 'Sonos Pi Auto-Archiver' && \
+     git config user.email 'sonos-pi@localhost'"
+   ```
+
 ## Dashboard
 
 Runs automatically via `sonos-dashboard.service` at `http://192.168.50.99:8080`.
