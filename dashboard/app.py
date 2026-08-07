@@ -1642,11 +1642,22 @@ def _build_ei_runner_unit(mode):
     # Card *numbers* aren't stable across reboots (load order can change which
     # slot a card lands in), so resolve the current number for this card id
     # right before starting ei-runner, rather than hardcoding "hw:N,0".
+    # --monitor enables Edge Impulse's Model Monitoring (continuous local
+    # inference + periodic summary upload to Studio) -- lost once already
+    # because it was only ever applied live to the unit file, never
+    # committed here, so a card rebuild silently dropped it.
+    #
+    # --monitor needs to authenticate to upload summaries; without --api-key
+    # it tries an INTERACTIVE login prompt ("What is your user name or
+    # e-mail address?"), which can't work under systemd (no TTY) -- it just
+    # exits immediately and restart-loops forever. cfg.EI_API_KEY is only
+    # ever baked into the live unit file generated here, never committed.
     exec_start = (
         "/bin/sh -c "
         f'\'CARD=$(grep -oP "^\\s*\\K[0-9]+(?=.*\\[{card_id})" /proc/asound/cards); '
         'exec /usr/bin/edge-impulse-linux-runner --microphone "hw:$CARD,0" '
-        "--model-file /home/msenese/sonos-model.eim --disable-camera'"
+        f'--model-file /home/msenese/sonos-model.eim --disable-camera --monitor '
+        f"--api-key {cfg.EI_API_KEY}'"
     )
 
     return f"""[Unit]
@@ -1668,6 +1679,23 @@ WantedBy=multi-user.target
 def _run_sudo(*args, timeout=15):
     result = subprocess.run(["sudo", *args], capture_output=True, text=True, timeout=timeout)
     if result.returncode != 0:
+        raise RuntimeError(f"{' '.join(args)} failed: {result.stderr.strip()}")
+
+
+def _run_sudo_tolerate_missing_unit(*args, timeout=15):
+    # Stopping/disabling a unit that was never installed (audio-buffer.service
+    # on a Pi that's never had Buffer mode set up, e.g. right after a card
+    # rebuild) is already the desired end state, not a failure -- but
+    # _switch_audio_mode_raw() used to treat it as one via plain _run_sudo(),
+    # which raised and aborted mid-switch: ei-runner had already been
+    # stopped by that point and the function never got far enough to write
+    # the new unit or restart it, leaving the pipeline down. Confirmed live.
+    result = subprocess.run(["sudo", *args], capture_output=True, text=True, timeout=timeout)
+    # systemctl phrases "this unit isn't installed" differently depending on
+    # the subcommand -- confirmed live: `stop` says "not loaded", `disable`
+    # says "does not exist". Tolerate both rather than guess at more.
+    missing_unit_phrases = ("not loaded", "not found", "does not exist")
+    if result.returncode != 0 and not any(p in result.stderr for p in missing_unit_phrases):
         raise RuntimeError(f"{' '.join(args)} failed: {result.stderr.strip()}")
 
 
@@ -1706,8 +1734,8 @@ def _switch_audio_mode_raw(mode):
         if not _wait_for_audio_buffer_input(timeout=15):
             raise RuntimeError("audio-buffer.py did not lock onto the microphone in time")
     else:
-        _run_sudo("systemctl", "stop", "audio-buffer.service")
-        _run_sudo("systemctl", "disable", "audio-buffer.service")
+        _run_sudo_tolerate_missing_unit("systemctl", "stop", "audio-buffer.service")
+        _run_sudo_tolerate_missing_unit("systemctl", "disable", "audio-buffer.service")
         # Auto-Resume Playback's and Keep Unmuted's toggles only exist in the
         # UI while Capture Mode is On -- don't leave either silently enabled
         # with no visible way to turn it off once we're switching Off.

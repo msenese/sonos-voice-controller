@@ -234,7 +234,12 @@ below.
    ssh msenese@192.168.50.99 "chmod +x /home/msenese/sonos-model.eim && chmod 600 /home/msenese/config.py"
    ```
 
-4. Install the systemd units (first time only):
+4. Install the systemd units (first time only). First replace
+   `YOUR_EI_API_KEY_HERE` in `services/ei-runner.service` with the real
+   `EI_API_KEY` from `config.py` -- `--monitor` (Model Monitoring) needs it
+   to authenticate; without it, the runner tries an *interactive* login
+   prompt under systemd (no TTY), which fails instantly and restart-loops
+   forever. Confirmed live -- don't skip this:
 
    ```bash
    scp services/*.service msenese@192.168.50.99:/tmp/

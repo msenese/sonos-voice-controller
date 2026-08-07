@@ -12,7 +12,21 @@ ExecStartPre=/bin/sh -c 'grep -q wm8960soundcard /proc/asound/cards || (echo "ei
 # shift them), so resolve the current number for this card id right before
 # starting, rather than hardcoding hw:1,0 -- same technique as
 # dashboard/app.py's _build_ei_runner_unit().
-ExecStart=/bin/sh -c 'CARD=$(grep -oP "^\s*\K[0-9]+(?=.*\[wm8960soundcard)" /proc/asound/cards); exec /usr/bin/edge-impulse-linux-runner --microphone "hw:$CARD,0" --model-file /home/msenese/sonos-model.eim --disable-camera'
+# --monitor enables Edge Impulse's Model Monitoring (continuous local
+# inference + periodic summary upload to Studio) -- confirmed live this
+# runner version/target supports it. Verified NOT to survive the card
+# rebuild the first time because it was only ever applied live, never
+# committed here -- don't repeat that.
+#
+# --monitor needs to authenticate to upload summaries; without --api-key it
+# tries an INTERACTIVE login prompt, which can't work under systemd (no
+# TTY) -- it exits immediately and restart-loops forever. Replace
+# YOUR_EI_API_KEY_HERE below with the real key from config.py before
+# installing this file (this static template is only used for initial
+# manual setup -- the dashboard's own _build_ei_runner_unit() in
+# dashboard/app.py fills this in automatically from cfg.EI_API_KEY whenever
+# it regenerates the live unit, e.g. on a Classic/Buffer mode switch).
+ExecStart=/bin/sh -c 'CARD=$(grep -oP "^\s*\K[0-9]+(?=.*\[wm8960soundcard)" /proc/asound/cards); exec /usr/bin/edge-impulse-linux-runner --microphone "hw:$CARD,0" --model-file /home/msenese/sonos-model.eim --disable-camera --monitor --api-key YOUR_EI_API_KEY_HERE'
 Restart=always
 RestartSec=5
 
