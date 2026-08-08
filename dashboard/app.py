@@ -1609,6 +1609,17 @@ def archive_model_to_git(accuracy=None):
         return {"archived": True, "filename": dated_name}
     except OSError as e:
         return {"archived": False, "error": str(e)}
+    except subprocess.SubprocessError as e:
+        # Covers subprocess.TimeoutExpired specifically -- confirmed live
+        # 2026-08-08: a slow `git push` (30s timeout) raised this uncaught,
+        # crashing the whole /api/model/activate request with an unhandled
+        # exception (Flask's HTML error page, not JSON) even though the
+        # actual model activation above this call had already fully
+        # succeeded. The push had in fact gone through on GitHub's side by
+        # the time the local subprocess call gave up waiting -- this is a
+        # best-effort archive step, and it timing out should never make the
+        # frontend think activation itself failed.
+        return {"archived": False, "error": f"git operation timed out: {e}"}
 
 
 @app.route("/api/model/activate", methods=["POST"])
