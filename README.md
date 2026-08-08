@@ -352,6 +352,31 @@ It shows:
   Pi. The card always shows which model is currently live (activation date
   and accuracy, from a `sonos-model.meta.json` sidecar file written on every
   activate/rollback) so this doesn't get lost track of over time.
+  - The confusion matrix is **row-normalized percentages** (each row = one
+    true class; cells = % of that class's samples predicted as each
+    column), matching Edge Impulse's own Studio display exactly -- verified
+    by hand against a real Studio screenshot, every cell matched. The raw
+    count is kept as a smaller secondary line under each percentage. An F1
+    row runs along the bottom (`report[classIndex]["f1-score"]` from EI's
+    `/training/keras/{id}/metadata` response). Diagonal cells tint green,
+    off-diagonal tint red, scaled by percentage; a true 0% stays neutral
+    rather than getting a distracting tint either way.
+  - The accuracy figure in "Currently running" is a toggle link that
+    shows/hides the confusion matrix **for that specific activation** --
+    not a live re-fetch from Edge Impulse. The full metrics payload
+    (classNames/confusionMatrix/report/loss) is captured client-side at the
+    moment of activation (whatever the retrain flow actually just
+    displayed) and sent along with the `/api/model/activate` request,
+    which persists it into that model's `meta.json`. This matters because
+    EI's server-side "latest trained" state can drift from what's actually
+    live on the Pi (e.g. a later retrain that was never activated) --
+    re-fetching at click time could show the wrong model's data. Falls
+    back to plain text (no link) for activations from before this existed.
+  - The retrain flow's own matrix panel (shown right after a fresh
+    Retrain/Build) hides itself the moment activation succeeds -- its data
+    becomes redundant with the "Currently running" toggle at that point,
+    and leaving both visible at once made it look like a stuck, disconnected
+    duplicate rather than the same information in one place.
 - **Rollback to Previous Model** (only shown when a previous model exists):
   swaps `sonos-model.eim` and `sonos-model-previous.eim` and restarts
   `ei-runner`. This is a true swap, not an overwrite -- the outgoing live
