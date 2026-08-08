@@ -1,0 +1,13 @@
+[Unit]
+Description=Clean up corrupted (zero-byte) ei-runner --monitor cache files
+# Doesn't need ei-runner running to be useful (it's harmless either way),
+# but there's no reason to fight it for a lock or interleave with a restart.
+After=ei-runner.service
+
+[Service]
+Type=oneshot
+User=msenese
+# --running: only touch files older than 5 minutes, since ei-runner may
+# genuinely be mid-write to a brand new file right now. See
+# ei-runner-cache-cleanup.sh and docs/model-monitoring-corruption.md.
+ExecStart=/home/msenese/services/ei-runner-cache-cleanup.sh --running

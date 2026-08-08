@@ -5,6 +5,12 @@ After=network.target sound.target
 [Service]
 User=msenese
 ExecStartPre=/bin/sh -c 'grep -q wm8960soundcard /proc/asound/cards || (echo "ei-runner: wm8960 sound card not found in /proc/asound/cards" >&2; exit 1)'
+# Self-heals --monitor's local cache after a crash or hard power-cycle --
+# see docs/model-monitoring-corruption.md and
+# services/ei-runner-cache-cleanup.sh for the full story. Without this,
+# a single zero-byte cache file left by an interrupted write makes the
+# runner crash-loop forever on startup.
+ExecStartPre=/home/msenese/services/ei-runner-cache-cleanup.sh
 # edge-impulse-linux-runner rejects named ALSA addressing outright (confirmed
 # live: "cannot find microphones with that name" for --microphone
 # hw:wm8960soundcard,0) -- it only accepts numeric hw:N,0 matching its own

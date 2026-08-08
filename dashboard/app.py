@@ -1667,6 +1667,7 @@ After=network.target sound.target
 [Service]
 User=msenese
 ExecStartPre=/bin/sh -c '{precheck}'
+ExecStartPre=/home/msenese/services/ei-runner-cache-cleanup.sh
 ExecStart={exec_start}
 Restart=always
 RestartSec=5
