@@ -986,6 +986,12 @@ activateBtn.addEventListener("click", async () => {
     modelStatus.textContent = archive.archived
       ? `New model activated and ei-runner restarted. Archived to git as ${archive.filename}.`
       : `New model activated and ei-runner restarted. Git archive failed: ${archive.error || "unknown error"}`;
+    // The just-activated model's data now lives in "Currently running"'s
+    // toggle (loadModelStatus() below pulls it from the meta.json this
+    // activate call just wrote) -- leaving this retrain-flow copy visible
+    // too made it look permanently "stuck open" and disconnected from the
+    // toggle, rather than the toggle being the one place to see it.
+    document.getElementById("model-metrics").style.display = "none";
   } catch (e) {
     modelStatus.textContent = `Error: ${e.message}`;
   } finally {
