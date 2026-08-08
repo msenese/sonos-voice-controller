@@ -381,6 +381,102 @@ It shows:
   you're done testing rather than leaving it running unattended, since it
   will resume playback after *any* pause, including ones you meant.
 
+## Reducing RAM usage (optional)
+
+The Pi Zero 2 W only has 512MB of RAM (415MB usable after GPU/firmware
+reservation), and this project's own footprint (ei-runner + the compiled
+model + sonos-controller.py + the dashboard) is a reasonably lean ~118MB --
+but the *default* Raspberry Pi OS image carries a lot of desktop-session
+weight that has nothing to do with running this project headless. Applying
+all of the below took this device from swapping ~226MB (genuinely thrashing
+under memory pressure) down to ~102MB, and roughly doubled free/available
+RAM. None of this is required for the project to work; it's optional
+tuning for a device that's tight on memory. None of it is captured by
+`backup-pi.sh` or this repo either (it's OS/session config, not project
+files), so it needs to be redone after a fresh rebuild.
+
+1. **Disable Tailscale if you don't need remote access right now**
+   (frees ~44MB). Keeps the existing registration/keys, so re-enabling
+   later is one command, no re-auth:
+
+   ```bash
+   ssh msenese@192.168.50.99 "sudo systemctl stop tailscaled && sudo systemctl disable tailscaled"
+   ```
+
+   **Important**: re-enable this *before* leaving your home network if
+   you're about to travel -- once you're actually away, there's no way to
+   turn it back on remotely, since Tailscale is the remote-access path
+   itself.
+
+   ```bash
+   ssh msenese@192.168.50.99 "sudo systemctl enable --now tailscaled"
+   ```
+
+2. **Switch the boot target to CLI-only** (no display attached, so the
+   GUI is pure waste -- frees a few MB and avoids Wayland/GPU-driver
+   startup overhead). Confirmed live that nothing this project depends on
+   (`ei-runner`, `sonos-controller`, `sonos-dashboard`) lives under
+   `graphical.target` only -- they're already pulled in by
+   `multi-user.target`:
+
+   ```bash
+   ssh msenese@192.168.50.99 "sudo systemctl set-default multi-user.target && sudo systemctl isolate multi-user.target"
+   ```
+
+3. **Disable the desktop-session services that silently restart on every
+   SSH login** (frees ~55MB) -- this was the real find: PipeWire/
+   WirePlumber, GVFS volume monitors, gnome-keyring, and the XDG desktop
+   portals aren't tied to the boot-time GUI at all. Any login (SSH
+   included) starts a systemd `--user` session, and this image's default
+   session pulls in a full GNOME desktop stack regardless of whether
+   anyone ever opens a graphical session. None of it is used here --
+   audio capture goes direct through ALSA (`arecord`,
+   `edge-impulse-linux-runner --microphone hw:N,0`), not PipeWire; there's
+   no GUI file manager to need GVFS; no GNOME app needs the keyring; no
+   sandboxed app needs the XDG portals.
+
+   Most of these are enabled *globally* (for any user), so a plain
+   `systemctl --user disable` doesn't fully stick -- confirmed live it
+   needs `--global`:
+
+   ```bash
+   ssh msenese@192.168.50.99 "sudo systemctl --global disable \
+     pipewire.service pipewire.socket \
+     pipewire-pulse.service pipewire-pulse.socket \
+     wireplumber.service filter-chain.service \
+     gnome-keyring-daemon.service gnome-keyring-daemon.socket \
+     mpris-proxy.service"
+   ```
+
+   The GVFS and XDG-portal services are D-Bus-activated on demand
+   (`systemctl --user is-enabled` reports `static` for these -- no
+   enable/disable toggle exists), so `mask` is the right tool instead of
+   `disable` -- it blocks activation outright rather than just skipping a
+   boot-time start:
+
+   ```bash
+   ssh msenese@192.168.50.99 "systemctl --user mask \
+     gvfs-daemon.service gvfs-afc-volume-monitor.service gvfs-goa-volume-monitor.service \
+     gvfs-gphoto2-volume-monitor.service gvfs-mtp-volume-monitor.service gvfs-udisks2-volume-monitor.service \
+     xdg-desktop-portal.service xdg-desktop-portal-gtk.service xdg-document-portal.service xdg-permission-store.service"
+   ```
+
+   Verify with a genuinely fresh SSH connection afterward (not a reused
+   session) that none of it restarts:
+
+   ```bash
+   ssh msenese@192.168.50.99 "ps -eo comm | grep -iE 'pipewire|wireplumber|gvfs|keyring|xdg|mpris|filter-chain' || echo clean"
+   ```
+
+4. **Don't disable cloud-init's boot-time provisioning** -- it's
+   genuinely useful for exactly the disaster-recovery scenario this repo
+   is designed around (re-configuring hostname/SSH/network from a fresh
+   image after a card failure). If `cloud-init status` reports `done` but
+   `ps aux | grep cloud-init` still shows a running `--all-stages`
+   process well after boot, that's a stray already-finished process (seen
+   live, ~32MB, no apparent ongoing purpose) -- safe to `sudo kill` just
+   that PID without touching cloud-init's actual boot units.
+
 ## Known-good milestones
 
 The dashboard's "Rollback to Previous Model" only remembers one prior
