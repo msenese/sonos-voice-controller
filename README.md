@@ -241,11 +241,22 @@ below.
    prompt under systemd (no TTY), which fails instantly and restart-loops
    forever. Confirmed live -- don't skip this:
 
+   Also deploy `ei-runner-cache-cleanup.sh` -- both `ei-runner.service`
+   below and the periodic timer call it directly at
+   `/home/msenese/services/`, and without it, a single zero-byte file left
+   by an interrupted `--monitor` write crash-loops `ei-runner.service`
+   forever on the next restart or power-cycle (see
+   `docs/model-monitoring-corruption.md`):
+
    ```bash
-   scp services/*.service msenese@192.168.50.99:/tmp/
-   ssh msenese@192.168.50.99 "sudo mv /tmp/ei-runner.service /tmp/sonos-controller.service /tmp/sonos-dashboard.service /etc/systemd/system/ \
+   ssh msenese@192.168.50.99 "mkdir -p ~/services"
+   scp services/ei-runner-cache-cleanup.sh msenese@192.168.50.99:~/services/
+   ssh msenese@192.168.50.99 "chmod +x ~/services/ei-runner-cache-cleanup.sh"
+
+   scp services/*.service services/*.timer msenese@192.168.50.99:/tmp/
+   ssh msenese@192.168.50.99 "sudo mv /tmp/ei-runner.service /tmp/sonos-controller.service /tmp/sonos-dashboard.service /tmp/ei-runner-cache-cleanup.service /tmp/ei-runner-cache-cleanup.timer /etc/systemd/system/ \
      && sudo systemctl daemon-reload \
-     && sudo systemctl enable --now ei-runner.service sonos-controller.service sonos-dashboard.service"
+     && sudo systemctl enable --now ei-runner.service sonos-controller.service sonos-dashboard.service ei-runner-cache-cleanup.timer"
    ```
 
    `audio-buffer.service` also deploys alongside these but stays inactive
