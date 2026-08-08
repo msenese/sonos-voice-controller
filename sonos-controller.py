@@ -17,6 +17,12 @@ STATE_FILE = "/tmp/sonos_controller_state.json"
 HISTORY_LIMIT = 50
 BUTTON_PIN = 17
 
+# Home directory, not /tmp -- this is meant to accumulate across days/
+# reboots to check whether the occasional ~2s pre-trigger pause correlates
+# with idle gap length (the working theory: swap-in delay after the kernel
+# reclaims idle process pages, not a raw CPU/inference speed issue).
+DETECTION_LATENCY_LOG = os.path.expanduser("~/detection_latency_log.jsonl")
+
 _state_write_lock = threading.Lock()
 
 last_trigger_time = 0
@@ -206,6 +212,39 @@ def post_capture(label, score):
         )
     except Exception:
         pass
+
+
+def _read_swap_used_kb():
+    try:
+        with open("/proc/meminfo") as f:
+            fields = {}
+            for line in f:
+                parts = line.split(":")
+                if len(parts) == 2:
+                    fields[parts[0].strip()] = parts[1].strip()
+        total = int(fields["SwapTotal"].split()[0])
+        free = int(fields["SwapFree"].split()[0])
+        return total - free
+    except (OSError, KeyError, ValueError, IndexError):
+        return None
+
+
+def _log_detection_latency(label, score, timestamp, idle_gap_s):
+    # idle_gap_s is None on the first detection after a process restart --
+    # last_trigger_time starts at 0, so "now - 0" would log a nonsense
+    # multi-decade gap rather than a real idle period.
+    entry = {
+        "timestamp": timestamp,
+        "label": label,
+        "score": score,
+        "idle_gap_s": round(idle_gap_s, 1) if idle_gap_s is not None else None,
+        "swap_used_kb": _read_swap_used_kb(),
+    }
+    try:
+        with open(DETECTION_LATENCY_LOG, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except OSError as e:
+        print(f"[LATENCY] Failed to log detection latency: {e}")
 
 
 def _set_muted(muted):
@@ -402,6 +441,12 @@ async def listen():
                                 consecutive_count[label] = consecutive_count.get(label, 0) + 1
                                 if consecutive_count[label] >= cfg.CONSECUTIVE_REQUIRED:
                                     if now - last_trigger_time >= cfg.COOLDOWN:
+                                        # Captured before last_trigger_time is
+                                        # overwritten below -- None on the
+                                        # very first detection since a
+                                        # restart (last_trigger_time starts
+                                        # at 0), see _log_detection_latency.
+                                        idle_gap = now - last_trigger_time if last_trigger_time > 0 else None
                                         last_trigger_time = now
                                         consecutive_count[label] = 0
                                         print(f"[DETECT] {label} ({score:.2f})")
@@ -410,6 +455,11 @@ async def listen():
                                             "score": score,
                                             "timestamp": now,
                                         })
+                                        # Fire-and-forget -- must never add
+                                        # latency to the actual response
+                                        # path we're trying to measure.
+                                        asyncio.create_task(asyncio.to_thread(
+                                            _log_detection_latency, label, score, now, idle_gap))
                                         await asyncio.to_thread(trigger_ha, label)
                                         await asyncio.to_thread(post_capture, label, score)
                                         await flash_green()

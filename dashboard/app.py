@@ -25,6 +25,11 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import config as cfg  # noqa: E402
 
 STATE_FILE = Path("/tmp/sonos_controller_state.json")
+# Written by sonos-controller.py on every real detection -- idle gap since
+# the previous detection + system swap usage at that moment, to check
+# whether the occasional ~2s pre-trigger pause correlates with idle gap
+# length (working theory: swap-in delay, not raw inference speed).
+DETECTION_LATENCY_LOG = Path.home() / "detection_latency_log.jsonl"
 TRAINING_DIR = PROJECT_ROOT / "training_samples"
 CONFIG_PATH = PROJECT_ROOT / "config.py"
 # Named by ALSA card id, not card number -- see the note by CLASSIC_CARD_ID
@@ -649,6 +654,29 @@ def _get_vad_suggestion(filename):
     with _vad_cache_lock:
         _vad_suggestion_cache[filename] = suggestion
     return suggestion
+
+
+@app.route("/api/detection-latency")
+def api_detection_latency():
+    if not DETECTION_LATENCY_LOG.exists():
+        return jsonify({"entries": []})
+    entries = []
+    try:
+        with open(DETECTION_LATENCY_LOG) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entries.append(json.loads(line))
+                except ValueError:
+                    continue
+    except OSError as e:
+        return jsonify({"error": str(e)}), 500
+    # Most recent last, capped -- this log only grows, and the chart cares
+    # about recent trend more than the full history once it's been running
+    # for weeks.
+    return jsonify({"entries": entries[-500:]})
 
 
 @app.route("/api/captures")

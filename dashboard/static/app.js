@@ -1763,6 +1763,94 @@ wrapEl.addEventListener("drop", (e) => {
   }
 });
 
+// --- Detection latency: idle gap vs. swap usage at each real detection ---
+// Scatter plot, not a time series -- the question is whether idle_gap_s and
+// swap_used_kb move together (working theory: swap-in delay after longer
+// idle periods causes the occasional ~2s pre-trigger pause), and a
+// correlation is far easier to see point-by-point than smeared across time.
+const latencyCanvas = document.getElementById("latency-canvas");
+const latencyCtx = latencyCanvas.getContext("2d");
+const latencyStatus = document.getElementById("latency-status");
+
+function pearsonCorrelation(xs, ys) {
+  const n = xs.length;
+  const meanX = xs.reduce((a, b) => a + b, 0) / n;
+  const meanY = ys.reduce((a, b) => a + b, 0) / n;
+  let cov = 0, varX = 0, varY = 0;
+  for (let i = 0; i < n; i++) {
+    const dx = xs[i] - meanX, dy = ys[i] - meanY;
+    cov += dx * dy; varX += dx * dx; varY += dy * dy;
+  }
+  if (varX === 0 || varY === 0) return null;
+  return cov / Math.sqrt(varX * varY);
+}
+
+async function loadDetectionLatency() {
+  try {
+    const res = await fetch("/api/detection-latency");
+    const data = await res.json();
+    renderDetectionLatency(data.entries || []);
+  } catch (e) {
+    latencyStatus.textContent = "Failed to load.";
+  }
+}
+
+function renderDetectionLatency(entries) {
+  const points = entries
+    .filter(e => e.idle_gap_s != null && e.swap_used_kb != null)
+    .map(e => ({ x: e.idle_gap_s, y: e.swap_used_kb / 1024 })); // MB
+
+  const w = latencyCanvas.width, h = latencyCanvas.height;
+  const padL = 46, padB = 30, padT = 10, padR = 10;
+  latencyCtx.clearRect(0, 0, w, h);
+
+  if (points.length === 0) {
+    latencyStatus.textContent = entries.length === 0
+      ? "No data yet -- accumulates on every real voice detection. Check back after a day or two of normal use."
+      : "No usable points yet (first detection after each restart has no idle-gap baseline).";
+    return;
+  }
+
+  const maxX = Math.max(1, ...points.map(p => p.x));
+  const maxY = Math.max(1, ...points.map(p => p.y));
+  const xToPx = x => padL + (x / maxX) * (w - padL - padR);
+  const yToPx = y => h - padB - (y / maxY) * (h - padT - padB);
+
+  latencyCtx.strokeStyle = cssVar("--gridline");
+  latencyCtx.fillStyle = cssVar("--muted");
+  latencyCtx.font = "11px -apple-system, sans-serif";
+  latencyCtx.beginPath();
+  latencyCtx.moveTo(padL, padT); latencyCtx.lineTo(padL, h - padB); latencyCtx.lineTo(w - padR, h - padB);
+  latencyCtx.stroke();
+  latencyCtx.fillText("idle gap (s) →", w / 2 - 40, h - 8);
+  latencyCtx.save();
+  latencyCtx.translate(12, h / 2 + 30);
+  latencyCtx.rotate(-Math.PI / 2);
+  latencyCtx.fillText("swap used (MB)", 0, 0);
+  latencyCtx.restore();
+
+  latencyCtx.fillStyle = cssVar("--series-1");
+  for (const p of points) {
+    latencyCtx.globalAlpha = 0.65;
+    latencyCtx.beginPath();
+    latencyCtx.arc(xToPx(p.x), yToPx(p.y), 4, 0, Math.PI * 2);
+    latencyCtx.fill();
+  }
+  latencyCtx.globalAlpha = 1;
+
+  let statusText = `${points.length} detection${points.length === 1 ? "" : "s"} logged.`;
+  if (points.length >= 5) {
+    const r = pearsonCorrelation(points.map(p => p.x), points.map(p => p.y));
+    if (r !== null) {
+      const strength = Math.abs(r) > 0.5 ? "fairly strong" : Math.abs(r) > 0.2 ? "weak" : "no real";
+      statusText += ` Correlation (idle gap vs. swap): r=${r.toFixed(2)} -- ${strength} relationship.`;
+    }
+  } else {
+    statusText += " Need at least 5 for a correlation estimate.";
+  }
+  latencyStatus.textContent = statusText;
+}
+
 pollState();
 pollSystem();
 pollSonos();
@@ -1773,7 +1861,9 @@ loadAutoResume();
 loadKeepUnmuted();
 loadModelStatus();
 refreshDeployAvailability();
+loadDetectionLatency();
 setInterval(pollState, 1000);
 setInterval(pollSystem, 5000);
 setInterval(pollSonos, 5000);
 setInterval(loadCaptures, 5000);
+setInterval(loadDetectionLatency, 30000); // only changes on real detections, no need to poll fast
