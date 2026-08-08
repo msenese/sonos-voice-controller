@@ -503,3 +503,9 @@ button.danger:hover { border-color: var(--status-critical); opacity: 0.9; }
   color: var(--text-secondary);
   margin-top: 8px;
 }
+
+.status-line a {
+  color: var(--accent-violet);
+  text-decoration: underline;
+  cursor: pointer;
+}

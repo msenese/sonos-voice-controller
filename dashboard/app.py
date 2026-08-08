@@ -89,8 +89,22 @@ def read_model_meta(path):
         return None
 
 
-def write_model_meta(path, activated_at, accuracy, source):
-    path.write_text(json.dumps({"activated_at": activated_at, "accuracy": accuracy, "source": source}))
+def write_model_meta(path, activated_at, accuracy, source, metrics=None):
+    # metrics (classNames/confusionMatrix/report/loss) is whatever the
+    # frontend actually displayed during the retrain flow that led to this
+    # activation -- captured at that moment rather than re-fetched from EI
+    # here, so "Currently running"'s confusion-matrix toggle always shows
+    # exactly what was reviewed before activating, not whatever EI's
+    # servers happen to say now (which can have moved on if there's been a
+    # later retrain that was never activated). None for models activated
+    # before this existed, or activated from a Studio-side retrain the
+    # dashboard never saw metrics for.
+    path.write_text(json.dumps({
+        "activated_at": activated_at,
+        "accuracy": accuracy,
+        "source": source,
+        "metrics": metrics,
+    }))
 
 
 def label_to_slug(label):
@@ -1630,6 +1644,10 @@ def api_model_activate():
     body = request.get_json(silent=True) or {}
     raw_accuracy = body.get("accuracy")
     accuracy = raw_accuracy if isinstance(raw_accuracy, (int, float)) else None
+    # Whatever the frontend actually rendered during the retrain flow --
+    # see write_model_meta()'s comment for why this is captured here
+    # rather than re-fetched from EI at activation time.
+    metrics = body.get("metrics") if isinstance(body.get("metrics"), dict) else None
 
     if LIVE_MODEL_PATH.exists():
         MODEL_BACKUP_PATH.write_bytes(LIVE_MODEL_PATH.read_bytes())
@@ -1640,7 +1658,7 @@ def api_model_activate():
         else:
             MODEL_BACKUP_META_PATH.unlink(missing_ok=True)
     PENDING_MODEL_PATH.replace(LIVE_MODEL_PATH)
-    write_model_meta(LIVE_MODEL_META_PATH, time.time(), accuracy, "retrain")
+    write_model_meta(LIVE_MODEL_META_PATH, time.time(), accuracy, "retrain", metrics)
 
     try:
         result = subprocess.run(

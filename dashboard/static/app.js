@@ -108,8 +108,8 @@ function formatModelMeta(meta) {
   const date = new Date(meta.activated_at * 1000).toLocaleDateString(undefined, {
     year: "numeric", month: "short", day: "numeric",
   });
-  const acc = typeof meta.accuracy === "number" ? `, ${meta.accuracy.toFixed(1)}% accuracy` : "";
-  return `${date} (${timeAgo(meta.activated_at)}${acc})`;
+  const accuracyText = typeof meta.accuracy === "number" ? `${meta.accuracy.toFixed(1)}% accuracy` : null;
+  return { date, ago: timeAgo(meta.activated_at), accuracyText };
 }
 
 async function pollState() {
@@ -817,20 +817,42 @@ async function pollJob(jobId) {
   }
 }
 
-function renderConfusionMatrix(classNames, matrix) {
-  const flat = matrix.flat();
-  const max = Math.max(...flat, 1);
-  const table = document.getElementById("confusion-matrix");
+function renderConfusionMatrix(classNames, matrix, report, targetId = "confusion-matrix") {
+  // Row-normalized percentages (each row = one true class, cells = % of
+  // that class's samples predicted as each column) -- matches Edge
+  // Impulse's own Studio display, which this was compared against
+  // directly: same underlying confusionMatrix/report data, EI just shows
+  // value/rowSum instead of the raw count alone. Raw count kept as a
+  // smaller secondary line per cell rather than dropped entirely.
+  const table = document.getElementById(targetId);
+  const goodRgb = "12,163,12";   // --status-good
+  const critRgb = "208,59,59";   // --status-critical
   let html = "<tr><th></th>" + classNames.map(c => `<th style="padding:4px 8px;font-weight:600;">${c}</th>`).join("") + "</tr>";
   matrix.forEach((row, i) => {
+    const rowSum = row.reduce((a, b) => a + b, 0) || 1;
     html += `<tr><th style="padding:4px 8px;text-align:right;font-weight:600;">${classNames[i] || ""}</th>`;
-    row.forEach(value => {
-      const alpha = 0.12 + 0.8 * (value / max);
-      const color = alpha > 0.55 ? "#fff" : "var(--text-primary)";
-      html += `<td style="padding:6px 10px;text-align:center;background:rgba(42,120,214,${alpha});color:${color};">${value}</td>`;
+    row.forEach((value, j) => {
+      const pct = (value / rowSum) * 100;
+      const isDiagonal = i === j;
+      // 0% stays neutral either way -- a true 0 isn't "confidently wrong,"
+      // it's just absence, and tinting it distracts from cells that
+      // actually indicate something.
+      const rgb = isDiagonal ? goodRgb : critRgb;
+      const alpha = pct === 0 ? 0 : 0.10 + 0.55 * (pct / 100);
+      html += `<td style="padding:6px 10px;text-align:center;background:rgba(${rgb},${alpha});">` +
+        `<div style="font-weight:600;">${pct.toFixed(1)}%</div>` +
+        `<div style="font-size:10px;color:var(--muted);">${value}</div>` +
+        `</td>`;
     });
     html += "</tr>";
   });
+  if (report) {
+    html += `<tr><th style="padding:4px 8px;text-align:right;font-weight:600;color:var(--muted);">F1 score</th>` +
+      classNames.map((c, i) => {
+        const f1 = report[String(i)] && report[String(i)]["f1-score"];
+        return `<td style="padding:6px 10px;text-align:center;color:var(--muted);">${typeof f1 === "number" ? f1.toFixed(2) : "&mdash;"}</td>`;
+      }).join("") + "</tr>";
+  }
   table.innerHTML = html;
 }
 
@@ -855,6 +877,12 @@ async function refreshDeployAvailability() {
 }
 
 let lastModelAccuracy = null;
+// Full metrics payload from the retrain flow, sent along with the activate
+// request so "Currently running"'s confusion-matrix toggle can show
+// exactly what was reviewed here -- not a fresh EI fetch that might
+// reflect a later, never-activated retrain. See write_model_meta()'s
+// comment in dashboard/app.py.
+let lastModelMetrics = null;
 
 async function loadModelMetrics() {
   const res = await fetch("/api/model/metrics");
@@ -863,9 +891,16 @@ async function loadModelMetrics() {
   const metrics = (data.modelValidationMetrics || [])[0];
   if (!metrics) throw new Error("no validation metrics available");
   lastModelAccuracy = metrics.accuracy * 100;
+  lastModelMetrics = {
+    classNames: data.classNames,
+    confusionMatrix: metrics.confusionMatrix,
+    report: metrics.report,
+    loss: metrics.loss,
+    accuracy: lastModelAccuracy,
+  };
   document.getElementById("model-accuracy").textContent = `${lastModelAccuracy.toFixed(1)}%`;
   document.getElementById("model-loss").textContent = metrics.loss.toFixed(3);
-  renderConfusionMatrix(data.classNames, metrics.confusionMatrix);
+  renderConfusionMatrix(data.classNames, metrics.confusionMatrix, metrics.report);
   document.getElementById("model-metrics").style.display = "block";
 }
 
@@ -877,6 +912,7 @@ retrainBtn.addEventListener("click", async () => {
   // dependency, unlike the rest of the old gating here.
   buildBtn.disabled = true;
   document.getElementById("model-metrics").style.display = "none";
+  lastModelMetrics = null;
   modelStatus.textContent = "Starting retrain job...";
   try {
     const startRes = await fetch("/api/model/retrain/start", { method: "POST" });
@@ -942,7 +978,7 @@ activateBtn.addEventListener("click", async () => {
     const res = await fetch("/api/model/activate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ accuracy: lastModelAccuracy }),
+      body: JSON.stringify({ accuracy: lastModelAccuracy, metrics: lastModelMetrics }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error);
@@ -961,25 +997,45 @@ activateBtn.addEventListener("click", async () => {
 // --- Model status / rollback ---
 
 const modelCurrentStatus = document.getElementById("model-current-status");
+const liveMatrixContainer = document.getElementById("live-confusion-matrix-container");
 const rollbackRow = document.getElementById("model-rollback-row");
 const rollbackBtn = document.getElementById("model-rollback");
 const rollbackStatus = document.getElementById("model-rollback-status");
+
+// Metrics for whatever's currently rendered as "Currently running" --
+// only set when the live model's meta.json actually has a stored metrics
+// object (older activations, or ones from a Studio-side retrain the
+// dashboard never captured, won't have one -- accuracy just shows as
+// plain text in that case, not a broken/empty link).
+let liveModelMetrics = null;
 
 async function loadModelStatus() {
   try {
     const res = await fetch("/api/model/status");
     const data = await res.json();
 
-    const liveDesc = formatModelMeta(data.live);
-    modelCurrentStatus.textContent = liveDesc
-      ? `Currently running: activated ${liveDesc}`
-      : "Currently running: no activation metadata recorded for this model yet.";
+    const liveMeta = formatModelMeta(data.live);
+    liveModelMetrics = (data.live && data.live.metrics) || null;
+    if (liveMeta) {
+      const accHtml = liveMeta.accuracyText
+        ? (liveModelMetrics
+            ? `<a href="#" id="live-accuracy-toggle" title="Click to show/hide the confusion matrix for this activation">${liveMeta.accuracyText}</a>`
+            : liveMeta.accuracyText)
+        : null;
+      const parenContent = accHtml ? `${liveMeta.ago}, ${accHtml}` : liveMeta.ago;
+      modelCurrentStatus.innerHTML = `Currently running: activated ${liveMeta.date} (${parenContent})`;
+    } else {
+      modelCurrentStatus.textContent = "Currently running: no activation metadata recorded for this model yet.";
+    }
+    // A newly-activated model (or one with no metrics at all) shouldn't
+    // leave a stale matrix from whatever was previously expanded.
+    if (!liveModelMetrics) liveMatrixContainer.style.display = "none";
 
     rollbackRow.style.display = data.previous_exists ? "" : "none";
     if (data.previous_exists) {
-      const prevDesc = formatModelMeta(data.previous);
-      rollbackStatus.textContent = prevDesc
-        ? `Roll back to the model activated ${prevDesc}.`
+      const prevMeta = formatModelMeta(data.previous);
+      rollbackStatus.textContent = prevMeta
+        ? `Roll back to the model activated ${prevMeta.date} (${prevMeta.ago}${prevMeta.accuracyText ? ", " + prevMeta.accuracyText : ""}).`
         : "Roll back to the previous model (no activation metadata recorded for it).";
     }
   } catch (e) {
@@ -987,6 +1043,25 @@ async function loadModelStatus() {
     // surface connectivity issues.
   }
 }
+
+// Delegated (not bound inside loadModelStatus) since that function -- and
+// therefore the link inside it -- gets re-created via innerHTML on every
+// call (page load, post-activate, post-rollback); a listener attached
+// directly to the link would be silently lost each time.
+modelCurrentStatus.addEventListener("click", (e) => {
+  if (!e.target.closest("#live-accuracy-toggle")) return;
+  e.preventDefault();
+  if (!liveModelMetrics) return;
+  const showing = liveMatrixContainer.style.display !== "none";
+  if (showing) {
+    liveMatrixContainer.style.display = "none";
+  } else {
+    renderConfusionMatrix(
+      liveModelMetrics.classNames, liveModelMetrics.confusionMatrix,
+      liveModelMetrics.report, "live-confusion-matrix");
+    liveMatrixContainer.style.display = "block";
+  }
+});
 
 rollbackBtn.addEventListener("click", async () => {
   const ok = confirm(
