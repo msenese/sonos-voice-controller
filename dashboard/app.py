@@ -160,6 +160,7 @@ def read_state():
             "history": [],
             "connection_status": "unknown",
             "muted": None,
+            "ha_unreachable": None,
             "updated_at": None,
         }
     try:
@@ -170,6 +171,7 @@ def read_state():
             "history": [],
             "connection_status": "unknown",
             "muted": None,
+            "ha_unreachable": None,
             "updated_at": None,
         }
 

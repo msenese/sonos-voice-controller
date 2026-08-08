@@ -151,6 +151,13 @@ async function pollState() {
     setBadge(muteBadge, muteText, null, "mute: unknown");
   }
 
+  // Only shown when actually broken -- no "HA: OK" noise the rest of the
+  // time. Same signal as the controller's white-blink LED (ha_unreachable
+  // in sonos-controller.py), surfaced here too since you won't always be
+  // looking at the physical device.
+  document.getElementById("ha-unreachable-badge").style.display =
+    state.ha_unreachable ? "inline-flex" : "none";
+
   const history = state.history || [];
   const lastDetectedEl = document.getElementById("last-detected");
   if (history.length) {

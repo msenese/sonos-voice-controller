@@ -34,6 +34,16 @@ detection_history = []
 connection_status = "disconnected"
 is_muted = None
 is_paused = None
+# True when poll_player_state() can't get a real reading -- either the HA
+# call itself fails (HA down, network blip, bad token) or it succeeds but
+# the entity reports "unavailable" (e.g. the 2026-08-07 incident: Sonos's
+# UPnP event subscriptions expired, HA lost track of several speakers
+# while they kept playing fine on their own). One flag for both, since
+# from the LED's perspective they mean the same practical thing: something
+# between here and the actual speaker is broken. Checked every second by
+# poll_player_state() regardless of whether a command was just issued, so
+# this is accurate even if you haven't tried anything yet.
+ha_unreachable = False
 
 _config_mtime = os.path.getmtime(cfg.__file__)
 
@@ -95,6 +105,7 @@ def write_state():
         "history": detection_history[-HISTORY_LIMIT:],
         "connection_status": connection_status,
         "muted": is_muted,
+        "ha_unreachable": ha_unreachable,
         "updated_at": time.time(),
     }
     # write_state() is called from several async tasks that now run on
@@ -118,7 +129,22 @@ async def breathe():
     step = 0
     while True:
         if not led_override:
-            if is_muted:
+            if ha_unreachable:
+                # Rapid white blink -- deliberately not smooth breathing like
+                # every other state, and a color used nowhere else, so it
+                # can't be mistaken for muted/paused/normal at a glance.
+                # Distinct from the solid-red "can't reach the wake-word
+                # engine at all" state too (see listen()'s except block) --
+                # that's a more foundational failure (nothing is listening);
+                # this one means detection is fine but Home Assistant/Sonos
+                # itself is the problem. time.time()-based, not the sine
+                # `step` counter, so the blink rate doesn't depend on this
+                # loop's own timing.
+                if int(time.time() * 2) % 2 == 0:
+                    set_leds(18, 18, 15)
+                else:
+                    set_leds(0, 0, 0)
+            elif is_muted:
                 # Computed directly from the sine wave rather than scaling down
                 # the (already clamped-to-3..25) non-muted `brightness` value --
                 # shrinking that by 0.25 and flooring at 2 collapsed the usable
@@ -149,6 +175,20 @@ async def breathe():
 
 async def flash_green():
     await flash_color(0, 20, 0)
+
+
+async def flash_result():
+    # A command (button press or voice detection) just went through --
+    # flash green for real success, or the same white used by breathe()'s
+    # ha_unreachable state if we already know the HA/Sonos link is broken.
+    # Both toggle_mute() and trigger_ha() can return normally (HA accepts
+    # the service call) even when the target entity is unavailable and
+    # nothing actually happens -- flashing green there was the exact
+    # "lights blink but nothing happens" confusion from 2026-08-07.
+    if ha_unreachable:
+        await flash_color(18, 18, 15)
+    else:
+        await flash_green()
 
 
 async def flash_color(r, g, b):
@@ -354,7 +394,7 @@ async def watch_button():
             if last_state == GPIO.HIGH and current_state == GPIO.LOW:
                 print("[BTN] Button pressed - toggling mute")
                 await asyncio.to_thread(toggle_mute)
-                await flash_green()
+                await flash_result()
             last_state = current_state
         except Exception as e:
             print(f"[BTN] Error: {e}")
@@ -368,6 +408,13 @@ def _fetch_player_state():
     }
     response = _ha_request("GET", f"{cfg.HA_URL}/api/states/{cfg.SONOS_ENTITY}", headers=headers)
     state = response.json()
+    if state.get("state") == "unavailable":
+        # Raising here (rather than returning a sentinel) means this reuses
+        # poll_player_state()'s existing except-block handling below --
+        # same ha_unreachable signal whether HA itself is unreachable or
+        # it's reachable but has lost the entity, no separate code path
+        # needed for what's the same practical problem either way.
+        raise RuntimeError(f"{cfg.SONOS_ENTITY} is unavailable")
     attributes = state.get("attributes", {})
     volume_muted = attributes.get("is_volume_muted", False)
     volume_level = attributes.get("volume_level", 1.0)
@@ -382,13 +429,19 @@ def _fetch_player_state():
 
 
 async def poll_player_state():
-    global is_muted, is_paused
+    global is_muted, is_paused, ha_unreachable
     while True:
         try:
             is_muted, is_paused = await asyncio.to_thread(_fetch_player_state)
+            if ha_unreachable:
+                print("[HA] Recovered -- entity reachable again")
+            ha_unreachable = False
             write_state()
         except Exception as e:
-            print(f"[HA] Poll error: {e}")
+            if not ha_unreachable:
+                print(f"[HA] Poll error (entering ha_unreachable state): {e}")
+            ha_unreachable = True
+            write_state()
         # Was 5s -- a 5s poll meant the LED could lag a real volume change
         # by up to 5 seconds, which used to read as "it doesn't turn back
         # until ~6%" if you're raising volume gradually and glancing at the
@@ -462,7 +515,7 @@ async def listen():
                                             _log_detection_latency, label, score, now, idle_gap))
                                         await asyncio.to_thread(trigger_ha, label)
                                         await asyncio.to_thread(post_capture, label, score)
-                                        await flash_green()
+                                        await flash_result()
                             else:
                                 consecutive_count[label] = 0
                     write_state()
