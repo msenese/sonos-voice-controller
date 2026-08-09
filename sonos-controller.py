@@ -392,8 +392,20 @@ async def watch_button():
         try:
             current_state = GPIO.input(BUTTON_PIN)
             if last_state == GPIO.HIGH and current_state == GPIO.LOW:
-                print("[BTN] Button pressed - toggling mute")
-                await asyncio.to_thread(toggle_mute)
+                # A press while paused resumes playback instead of toggling
+                # mute -- checked fresh against live state on every press
+                # (is_paused, kept current by poll_player_state()), not a
+                # one-shot flag. That's what makes "a subsequent click goes
+                # back to mute/unmute" work for free: trigger_ha("sonos
+                # play") below sets is_paused = False immediately, so the
+                # very next press already sees "not paused" and falls
+                # through to the normal toggle -- no extra state to track.
+                if is_paused:
+                    print("[BTN] Button pressed while paused - resuming playback")
+                    await asyncio.to_thread(trigger_ha, "sonos play")
+                else:
+                    print("[BTN] Button pressed - toggling mute")
+                    await asyncio.to_thread(toggle_mute)
                 await flash_result()
             last_state = current_state
         except Exception as e:
