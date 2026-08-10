@@ -66,7 +66,14 @@ EI_API_BASE = "https://studio.edgeimpulse.com/v1/api"
 EI_BUILD_TARGET = "runner-linux-aarch64"
 EI_BUILD_ENGINE = "tflite"
 
-LABELS = ["noise", "sonos pause", "sonos play", "sonos mute", "unknown"]
+# "noise" merged into "unknown" 2026-08-10 -- neither ever had a distinct
+# action (both just meant "don't respond"), and forcing the model to also
+# separate them was injecting real label noise into training: accuracy
+# went 93.7% -> 98.4%, loss 0.170 -> 0.045 after merging. Every existing
+# "noise" sample was bulk-relabeled to "unknown" via the edit-label
+# endpoint (343 samples) -- see noise-samples-backup-*.json on the Pi for
+# the pre-merge snapshot if this ever needs reverting.
+LABELS = ["sonos pause", "sonos play", "sonos mute", "unknown"]
 
 CONFIG_FIELDS = {
     "THRESHOLD": {"type": float, "min": 0.0, "max": 1.0},
@@ -616,10 +623,14 @@ def _get_silero_session():
 
 
 def _vad_suggest_label_from_samples(samples):
-    # A starting-point default, not a real classifier -- speech-like
-    # activity anywhere in the clip suggests "unknown" (a real utterance,
-    # right command or not), no speech suggests "noise". `samples` is
-    # float32, normalized to [-1, 1], at 16kHz.
+    # Both branches suggest "unknown" now -- "noise" was merged into it
+    # (2026-08-10): neither ever had a distinct action, and forcing the
+    # model to also separate them was injecting real label noise
+    # (accuracy went 93.7% -> 98.4% after merging). Still runs the actual
+    # speech/no-speech judgment (returned as speech_detected) since that's
+    # useful diagnostic info on its own even though it no longer changes
+    # which label gets suggested. `samples` is float32, normalized to
+    # [-1, 1], at 16kHz.
     session = _get_silero_session()
     state = np.zeros((2, 1, 128), dtype=np.float32)
     context = np.zeros((1, SILERO_CONTEXT_SAMPLES), dtype=np.float32)
@@ -637,14 +648,14 @@ def _vad_suggest_label_from_samples(samples):
             speech += 1
 
     if total == 0:
-        return None
-    return "unknown" if (speech / total) > VAD_SPEECH_RATIO_THRESHOLD else "noise"
+        return None, None
+    return "unknown", (speech / total) > VAD_SPEECH_RATIO_THRESHOLD
 
 
 def _vad_suggest_label(path):
     with wave.open(str(path), "rb") as wf:
         if (wf.getframerate(), wf.getsampwidth(), wf.getnchannels()) != (16000, 2, 1):
-            return None
+            return None, None
         raw = wf.readframes(wf.getnframes())
     samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
     return _vad_suggest_label_from_samples(samples)
@@ -666,7 +677,7 @@ def _get_vad_suggestion(filename):
     try:
         suggestion = _vad_suggest_label(CAPTURE_DIR / filename)
     except (OSError, wave.Error):
-        suggestion = None
+        suggestion = (None, None)
     with _vad_cache_lock:
         _vad_suggestion_cache[filename] = suggestion
     return suggestion
@@ -707,7 +718,7 @@ def api_captures():
     data = r.json()
     captures = data.get("captures", [])
     for c in captures:
-        c["suggested_label"] = _get_vad_suggestion(c["filename"])
+        c["suggested_label"], c["vad_speech_detected"] = _get_vad_suggestion(c["filename"])
 
     current_filenames = {c["filename"] for c in captures}
     with _vad_cache_lock:
@@ -909,8 +920,8 @@ def api_train_segment(sample_id):
 
 
 # --- Low-confidence sample review ---
-# Runs the current trained model against every enabled "unknown"/"noise"
-# sample (GET /classify/{id}, confirmed via direct API probing to run
+# Runs the current trained model against every enabled "unknown" sample
+# (GET /classify/{id}, confirmed via direct API probing to run
 # synchronously per sample against the live model, no job queue needed)
 # and flags any where the model's own confidence in that sample's
 # assigned label falls below a threshold -- see find-low-confidence-samples.py
@@ -919,8 +930,10 @@ def api_train_segment(sample_id):
 # pass so the request doesn't hang, the frontend polls progress, and
 # Keep/Reclassify/Delete act directly on Edge Impulse the same way
 # Recordings to Review's Correct/relabel/Discard do.
+# Was ["unknown", "noise"] -- "noise" merged into "unknown" 2026-08-10,
+# no longer a separate class to target.
 
-LOW_CONFIDENCE_TARGET_LABELS = ["unknown", "noise"]
+LOW_CONFIDENCE_TARGET_LABELS = ["unknown"]
 LOW_CONFIDENCE_THRESHOLD_DEFAULT = 0.6
 
 _low_confidence_lock = threading.Lock()
@@ -931,7 +944,7 @@ _low_confidence_state = {
 }
 
 # Project-wide clipping scan (all labels, not just the low-confidence
-# review's "unknown"/"noise") -- a separate, cached background job since a
+# review's "unknown") -- a separate, cached background job since a
 # full pass over every enabled sample takes a few minutes, too slow to run
 # on every dashboard page load. Stays cached until the next "Scan" click,
 # same pattern as the low-confidence state above.
@@ -1052,11 +1065,11 @@ def _low_confidence_vad_for(sample_id):
     try:
         values, frequency = _low_confidence_fetch_raw(sample_id)
         if frequency != 16000:
-            return None
+            return None, None
         samples = np.array(values, dtype=np.float32) / 32768.0
         return _vad_suggest_label_from_samples(samples)
     except (requests.RequestException, KeyError, ValueError, IndexError):
-        return None
+        return None, None
 
 
 def _low_confidence_run(threshold):
@@ -1091,7 +1104,8 @@ def _low_confidence_run(threshold):
     with ThreadPoolExecutor(max_workers=5) as pool:
         vad_futures = {pool.submit(_low_confidence_vad_for, r["id"]): r for r in flagged}
         for future in as_completed(vad_futures):
-            vad_futures[future]["vad_suggestion"] = future.result()
+            entry = vad_futures[future]
+            entry["vad_suggestion"], entry["vad_speech_detected"] = future.result()
 
     with _low_confidence_lock:
         _low_confidence_state.update(results=flagged, running=False, last_run_at=time.time())
@@ -1154,7 +1168,8 @@ def _low_confidence_run_custom(sample_ids):
     with ThreadPoolExecutor(max_workers=5) as pool:
         vad_futures = {pool.submit(_low_confidence_vad_for, r["id"]): r for r in flagged}
         for future in as_completed(vad_futures):
-            vad_futures[future]["vad_suggestion"] = future.result()
+            entry = vad_futures[future]
+            entry["vad_suggestion"], entry["vad_speech_detected"] = future.result()
 
     with _low_confidence_lock:
         _low_confidence_state.update(results=flagged, running=False, last_run_at=time.time())

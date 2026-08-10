@@ -39,7 +39,7 @@
       <button id="run-analysis-btn" class="primary">Run Analysis</button>
       <label>Threshold <input type="number" id="threshold-input" min="0" max="1" step="0.05" value="0.6" style="width:70px;"></label>
     </div>
-    <div class="status-line" id="analysis-status">No analysis run yet. Runs the current trained model against every enabled "unknown"/"noise" sample and flags any where it doesn't confidently agree with the sample's own label. Takes a couple of minutes for the current dataset.</div>
+    <div class="status-line" id="analysis-status">No analysis run yet. Runs the current trained model against every enabled "unknown" sample and flags any where it doesn't confidently agree with the sample's own label. Takes a couple of minutes for the current dataset.</div>
   </div>
 
   <div class="card">
@@ -93,8 +93,11 @@ function renderResults(results) {
   }
   reviewList.innerHTML = results.map(r => {
     const options = labels.map(l => `<option value="${l}" ${l === r.top_label ? "selected" : ""}>${l}</option>`).join("");
+    // vad_suggestion is always "unknown" now (noise/unknown merged
+    // 2026-08-10 -- both are the same class), so speech/no-speech is its
+    // own field rather than inferred from the suggested label.
     const vadNote = r.vad_suggestion
-      ? ` &middot; VAD: ${r.vad_suggestion === "unknown" ? "speech detected" : "no speech"}`
+      ? ` &middot; VAD: ${r.vad_speech_detected ? "speech detected" : "no speech"}`
       : "";
     const dateNote = r.added ? ` &middot; ${new Date(r.added).toLocaleDateString()}` : "";
     // peak is only present for samples that went through a peak-amplitude

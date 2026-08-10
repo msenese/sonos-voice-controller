@@ -1,5 +1,4 @@
 const SERIES_COLORS = {
-  "noise": "var(--series-1)",
   "sonos pause": "var(--series-2)",
   "sonos play": "var(--series-3)",
   "sonos mute": "var(--series-4)",
@@ -1159,8 +1158,10 @@ async function loadCaptures() {
       const options = labels.map(l => `<option value="${l}" ${l === suggestion ? "selected" : ""}>${l}</option>`).join("");
       // VAD's guess is just a starting point (music with strong vocals fools
       // it into "unknown"), so it's shown plainly rather than styled as if
-      // it were a confident classification.
-      const vadNote = suggestion ? ` &middot; VAD: ${suggestion === "unknown" ? "speech detected" : "no speech"}` : "";
+      // it were a confident classification. suggested_label is always
+      // "unknown" now (noise/unknown merged 2026-08-10), so speech/no-speech
+      // comes from its own field rather than the label itself.
+      const vadNote = suggestion ? ` &middot; VAD: ${c.vad_speech_detected ? "speech detected" : "no speech"}` : "";
       return `
         <li class="${c.filename === lastPlayedFilename ? "last-played" : ""}">
           <span class="capture-row">
