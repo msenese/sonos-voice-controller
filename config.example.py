@@ -1,7 +1,15 @@
 HA_URL = "http://192.168.50.212:8123"
 HA_TOKEN = "your-token-here"
 EI_WS_URL = "ws://localhost:4912"
-SONOS_ENTITY = "media_player.office_1"
+# Confirm this against Home Assistant's actual current state, not just
+# what the entity_id implies -- entity_ids don't auto-update when a Sonos
+# room gets renamed or a speaker gets physically moved and re-paired
+# (confirmed live 2026-08-11: the office speakers got moved upstairs and
+# paired into media_player.bedroom_tv as satellites, and a previously
+# "Nightstand"-named pair got moved into the office -- but stayed
+# media_player.nightstand in HA, friendly_name and all, despite no longer
+# describing where the speaker physically is).
+SONOS_ENTITY = "media_player.nightstand"
 
 THRESHOLD = 0.92
 SONOS_PLAY_THRESHOLD = 0.85

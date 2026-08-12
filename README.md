@@ -210,11 +210,11 @@ below.
    HA_URL = "http://192.168.50.212:8123"
    HA_TOKEN = "your-token-here"        # Long-lived access token from HA
    EI_WS_URL = "ws://localhost:4912"
-   SONOS_ENTITY = "media_player.office_1"
+   SONOS_ENTITY = "media_player.nightstand"  # confirm against HA's actual current state -- entity_id doesn't auto-follow a Sonos room rename or speaker move, see config.example.py's comment
    THRESHOLD = 0.92
    SONOS_PLAY_THRESHOLD = 0.85
    COOLDOWN = 3.0
-   CONSECUTIVE_REQUIRED = 2
+   CONSECUTIVE_REQUIRED = 1
    EI_API_KEY = "your-edge-impulse-api-key-here"        # Ingestion+deployment role; training upload, build, download
    EI_PROJECT_ID = "your-project-id-here"                # Visible in the Studio URL
    EI_ADMIN_API_KEY = "your-edge-impulse-admin-api-key-here"  # Admin role; only used to trigger retrain
