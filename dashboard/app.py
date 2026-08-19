@@ -989,9 +989,6 @@ def _clipping_fetch_peak(sample):
 
 
 def _clipping_run():
-    with _clipping_lock:
-        _clipping_state.update(running=True, done=0, total=0, results=[])
-
     samples = _clipping_list_all_samples()
     with _clipping_lock:
         _clipping_state["total"] = len(samples)
@@ -1068,47 +1065,62 @@ def _low_confidence_vad_for(sample_id):
             return None, None
         samples = np.array(values, dtype=np.float32) / 32768.0
         return _vad_suggest_label_from_samples(samples)
-    except (requests.RequestException, KeyError, ValueError, IndexError):
+    except Exception:
+        # VAD here is a supplementary signal (see the caller's comment) --
+        # its own failure (bad response shape, or the ONNX model file going
+        # missing, confirmed live) must never take down the whole review
+        # batch. A narrower except tuple missed onnxruntime's exception
+        # type entirely, which propagated out of the ThreadPoolExecutor and
+        # killed the background thread before it reached the results/
+        # running=False update -- the analysis had finished but the page
+        # polled forever against a run that silently died.
         return None, None
 
 
 def _low_confidence_run(threshold):
-    with _low_confidence_lock:
-        _low_confidence_state.update(running=True, done=0, total=0, results=[], threshold=threshold, mode="confidence")
-
-    samples = []
-    for label in LOW_CONFIDENCE_TARGET_LABELS:
-        samples.extend(_low_confidence_list_samples(label))
-    with _low_confidence_lock:
-        _low_confidence_state["total"] = len(samples)
-
+    # Runs on a background thread started by the request handler -- nothing
+    # ever calls .result() or .join() on it, so an exception escaping this
+    # function has nowhere to go but the thread's own excepthook (a log
+    # line, easy to miss) and leaves running=True forever, since that's only
+    # cleared at the very end. The page's poll loop only reschedules itself
+    # while running=True, so a dead thread here means the review page polls
+    # forever and never shows an error. try/finally guarantees running
+    # always clears, however this function exits.
     flagged = []
-    with ThreadPoolExecutor(max_workers=5) as pool:
-        futures = {pool.submit(_low_confidence_classify_one, s): s for s in samples}
-        for future in as_completed(futures):
-            try:
-                result = future.result()
-                if result["self_confidence"] < threshold:
-                    flagged.append(result)
-            except requests.RequestException:
-                pass
-            with _low_confidence_lock:
-                _low_confidence_state["done"] += 1
+    try:
+        samples = []
+        for label in LOW_CONFIDENCE_TARGET_LABELS:
+            samples.extend(_low_confidence_list_samples(label))
+        with _low_confidence_lock:
+            _low_confidence_state["total"] = len(samples)
 
-    flagged.sort(key=lambda r: r["self_confidence"])
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            futures = {pool.submit(_low_confidence_classify_one, s): s for s in samples}
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    if result["self_confidence"] < threshold:
+                        flagged.append(result)
+                except requests.RequestException:
+                    pass
+                with _low_confidence_lock:
+                    _low_confidence_state["done"] += 1
 
-    # A second, independent signal on just the (much smaller) flagged set --
-    # VAD doesn't know about "sonos play/pause/mute" as concepts, only
-    # speech vs. not, so it can corroborate or contradict the trained
-    # model's own confidence gap from an entirely different angle.
-    with ThreadPoolExecutor(max_workers=5) as pool:
-        vad_futures = {pool.submit(_low_confidence_vad_for, r["id"]): r for r in flagged}
-        for future in as_completed(vad_futures):
-            entry = vad_futures[future]
-            entry["vad_suggestion"], entry["vad_speech_detected"] = future.result()
+        flagged.sort(key=lambda r: r["self_confidence"])
 
-    with _low_confidence_lock:
-        _low_confidence_state.update(results=flagged, running=False, last_run_at=time.time())
+        # A second, independent signal on just the (much smaller) flagged
+        # set -- VAD doesn't know about "sonos play/pause/mute" as
+        # concepts, only speech vs. not, so it can corroborate or
+        # contradict the trained model's own confidence gap from an
+        # entirely different angle.
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            vad_futures = {pool.submit(_low_confidence_vad_for, r["id"]): r for r in flagged}
+            for future in as_completed(vad_futures):
+                entry = vad_futures[future]
+                entry["vad_suggestion"], entry["vad_speech_detected"] = future.result()
+    finally:
+        with _low_confidence_lock:
+            _low_confidence_state.update(results=flagged, running=False, last_run_at=time.time())
 
 
 def _low_confidence_remove(sample_id):
@@ -1140,39 +1152,41 @@ def _low_confidence_run_custom(sample_ids):
     # find-clipping-samples.py's output) -- self-confidence is still shown
     # per sample since it's useful context, but it's not what selected
     # these, so nothing here is threshold-filtered.
-    with _low_confidence_lock:
-        _low_confidence_state.update(running=True, done=0, total=len(sample_ids), results=[], mode="clipping")
-
-    samples = []
-    with ThreadPoolExecutor(max_workers=5) as pool:
-        futures = {pool.submit(_low_confidence_fetch_sample_meta, sid): sid for sid in sample_ids}
-        for future in as_completed(futures):
-            try:
-                samples.append(future.result())
-            except requests.RequestException:
-                pass
-            with _low_confidence_lock:
-                _low_confidence_state["done"] += 1
-
+    #
+    # try/finally for the same reason as _low_confidence_run() above -- an
+    # exception escaping this background thread must still clear running,
+    # or the review page polls forever against a run that silently died.
     flagged = []
-    with ThreadPoolExecutor(max_workers=5) as pool:
-        futures = {pool.submit(_low_confidence_classify_one, s): s for s in samples}
-        for future in as_completed(futures):
-            try:
-                flagged.append(future.result())
-            except requests.RequestException:
-                pass
+    try:
+        samples = []
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            futures = {pool.submit(_low_confidence_fetch_sample_meta, sid): sid for sid in sample_ids}
+            for future in as_completed(futures):
+                try:
+                    samples.append(future.result())
+                except requests.RequestException:
+                    pass
+                with _low_confidence_lock:
+                    _low_confidence_state["done"] += 1
 
-    flagged.sort(key=lambda r: r["self_confidence"])
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            futures = {pool.submit(_low_confidence_classify_one, s): s for s in samples}
+            for future in as_completed(futures):
+                try:
+                    flagged.append(future.result())
+                except requests.RequestException:
+                    pass
 
-    with ThreadPoolExecutor(max_workers=5) as pool:
-        vad_futures = {pool.submit(_low_confidence_vad_for, r["id"]): r for r in flagged}
-        for future in as_completed(vad_futures):
-            entry = vad_futures[future]
-            entry["vad_suggestion"], entry["vad_speech_detected"] = future.result()
+        flagged.sort(key=lambda r: r["self_confidence"])
 
-    with _low_confidence_lock:
-        _low_confidence_state.update(results=flagged, running=False, last_run_at=time.time())
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            vad_futures = {pool.submit(_low_confidence_vad_for, r["id"]): r for r in flagged}
+            for future in as_completed(vad_futures):
+                entry = vad_futures[future]
+                entry["vad_suggestion"], entry["vad_speech_detected"] = future.result()
+    finally:
+        with _low_confidence_lock:
+            _low_confidence_state.update(results=flagged, running=False, last_run_at=time.time())
 
 
 @app.route("/review-low-confidence")
@@ -1194,6 +1208,16 @@ def api_low_confidence_run():
         return jsonify({"error": "invalid threshold"}), 400
     if not (0.0 <= threshold <= 1.0):
         return jsonify({"error": "threshold must be between 0 and 1"}), 400
+    # Set running=True here, before the thread starts, rather than as the
+    # first line of _low_confidence_run() itself -- otherwise a status poll
+    # landing between Thread.start() returning and the thread actually
+    # getting scheduled can see running=False (with a stale/absent
+    # last_run_at) and conclude the analysis already finished, which stops
+    # the page's poll loop for good since it only reschedules itself while
+    # running=True. The analysis still completes server-side, but the
+    # results never reach the page. Confirmed live during a demo.
+    with _low_confidence_lock:
+        _low_confidence_state.update(running=True, done=0, total=0, results=[], threshold=threshold, mode="confidence")
     threading.Thread(target=_low_confidence_run, args=(threshold,), daemon=True).start()
     return jsonify({"started": True})
 
@@ -1209,6 +1233,10 @@ def api_low_confidence_run_custom():
     sample_ids = body.get("sample_ids")
     if not isinstance(sample_ids, list) or not sample_ids or not all(isinstance(i, int) for i in sample_ids):
         return jsonify({"error": "sample_ids must be a non-empty list of integers"}), 400
+    # See the matching comment in api_low_confidence_run() -- running=True
+    # must be visible before the thread starts, not as its first line.
+    with _low_confidence_lock:
+        _low_confidence_state.update(running=True, done=0, total=len(sample_ids), results=[], mode="clipping")
     threading.Thread(target=_low_confidence_run_custom, args=(sample_ids,), daemon=True).start()
     return jsonify({"started": True})
 
@@ -1220,6 +1248,9 @@ def api_clipping_run():
     with _clipping_lock:
         if _clipping_state["running"]:
             return jsonify({"error": "scan already running"}), 409
+        # See the matching comment on api_low_confidence_run() -- must be
+        # visible before the thread starts, not as the thread's first line.
+        _clipping_state.update(running=True, done=0, total=0, results=[])
     threading.Thread(target=_clipping_run, daemon=True).start()
     return jsonify({"started": True})
 
@@ -1716,21 +1747,24 @@ def _build_ei_runner_unit(mode):
     # Card *numbers* aren't stable across reboots (load order can change which
     # slot a card lands in), so resolve the current number for this card id
     # right before starting ei-runner, rather than hardcoding "hw:N,0".
-    # --monitor enables Edge Impulse's Model Monitoring (continuous local
-    # inference + periodic summary upload to Studio) -- lost once already
-    # because it was only ever applied live to the unit file, never
-    # committed here, so a card rebuild silently dropped it.
     #
-    # --monitor needs to authenticate to upload summaries; without --api-key
-    # it tries an INTERACTIVE login prompt ("What is your user name or
-    # e-mail address?"), which can't work under systemd (no TTY) -- it just
-    # exits immediately and restart-loops forever. cfg.EI_API_KEY is only
-    # ever baked into the live unit file generated here, never committed.
+    # --monitor (Edge Impulse's Model Monitoring: continuous local inference
+    # + periodic summary upload to Studio) is deliberately OMITTED as of
+    # 2026-08-16 -- an experiment to see whether it's contributing to the
+    # ei-runner restart churn and/or the recurring media_player.office
+    # ha_unreachable incidents. Unconfirmed and possibly a coincidence (the
+    # two run on entirely separate network paths -- this WebSocket goes to
+    # Edge Impulse's cloud, HA polling is local), but cheap and reversible
+    # to rule out. Re-add `--monitor ` right after --disable-camera below to
+    # restore it. cfg.EI_API_KEY is only ever baked into the live unit file
+    # generated here, never committed -- without --monitor this key isn't
+    # actually needed for anything else edge-impulse-linux-runner does here,
+    # but it's harmless to keep passing.
     exec_start = (
         "/bin/sh -c "
         f'\'CARD=$(grep -oP "^\\s*\\K[0-9]+(?=.*\\[{card_id})" /proc/asound/cards); '
         'exec /usr/bin/edge-impulse-linux-runner --microphone "hw:$CARD,0" '
-        f'--model-file /home/msenese/sonos-model.eim --disable-camera --monitor '
+        f'--model-file /home/msenese/sonos-model.eim --disable-camera '
         f"--api-key {cfg.EI_API_KEY}'"
     )
 

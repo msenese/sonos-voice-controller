@@ -2,14 +2,23 @@ HA_URL = "http://192.168.50.212:8123"
 HA_TOKEN = "your-token-here"
 EI_WS_URL = "ws://localhost:4912"
 # Confirm this against Home Assistant's actual current state, not just
-# what the entity_id implies -- entity_ids don't auto-update when a Sonos
-# room gets renamed or a speaker gets physically moved and re-paired
+# what the entity_id implies -- entity_ids don't reliably track a Sonos
+# room rename or a speaker move in real time.
 # (confirmed live 2026-08-11: the office speakers got moved upstairs and
 # paired into media_player.bedroom_tv as satellites, and a previously
 # "Nightstand"-named pair got moved into the office -- but stayed
 # media_player.nightstand in HA, friendly_name and all, despite no longer
-# describing where the speaker physically is).
-SONOS_ENTITY = "media_player.nightstand"
+# describing where the speaker physically is)
+# (confirmed live 2026-08-14, ~3 days later: media_player.nightstand
+# disappeared outright -- 404 on a direct state lookup -- and was replaced
+# by a fresh media_player.office, presumably the Sonos app's room rename
+# finally propagating into HA's entity naming. Silent failure mode: HA
+# service calls against a nonexistent entity_id still return HTTP success
+# with zero matched entities, so sonos-controller.py kept logging
+# "[HA] Paused Sonos" etc. with no error for days after the entity behind
+# SONOS_ENTITY had already stopped existing -- worth an occasional sanity
+# check against reality, not just watching the logs for errors).
+SONOS_ENTITY = "media_player.office"
 
 THRESHOLD = 0.92
 SONOS_PLAY_THRESHOLD = 0.85
