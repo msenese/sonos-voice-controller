@@ -1748,23 +1748,24 @@ def _build_ei_runner_unit(mode):
     # slot a card lands in), so resolve the current number for this card id
     # right before starting ei-runner, rather than hardcoding "hw:N,0".
     #
-    # --monitor (Edge Impulse's Model Monitoring: continuous local inference
-    # + periodic summary upload to Studio) is deliberately OMITTED as of
-    # 2026-08-16 -- an experiment to see whether it's contributing to the
-    # ei-runner restart churn and/or the recurring media_player.office
-    # ha_unreachable incidents. Unconfirmed and possibly a coincidence (the
-    # two run on entirely separate network paths -- this WebSocket goes to
-    # Edge Impulse's cloud, HA polling is local), but cheap and reversible
-    # to rule out. Re-add `--monitor ` right after --disable-camera below to
-    # restore it. cfg.EI_API_KEY is only ever baked into the live unit file
-    # generated here, never committed -- without --monitor this key isn't
-    # actually needed for anything else edge-impulse-linux-runner does here,
-    # but it's harmless to keep passing.
+    # --monitor enables Edge Impulse's Model Monitoring (continuous local
+    # inference + periodic summary upload to Studio). Briefly removed on
+    # 2026-08-16 as an experiment to rule out whether it was contributing to
+    # the recurring media_player.office ha_unreachable incidents -- it
+    # wasn't; that whole saga traced to a shared power outlet knocking out
+    # the Sonos SonosNet bridge's Ethernet, unrelated to this Pi or this
+    # flag. Restored 2026-08-18.
+    #
+    # --monitor needs to authenticate to upload summaries; without --api-key
+    # it tries an INTERACTIVE login prompt ("What is your user name or
+    # e-mail address?"), which can't work under systemd (no TTY) -- it just
+    # exits immediately and restart-loops forever. cfg.EI_API_KEY is only
+    # ever baked into the live unit file generated here, never committed.
     exec_start = (
         "/bin/sh -c "
         f'\'CARD=$(grep -oP "^\\s*\\K[0-9]+(?=.*\\[{card_id})" /proc/asound/cards); '
         'exec /usr/bin/edge-impulse-linux-runner --microphone "hw:$CARD,0" '
-        f'--model-file /home/msenese/sonos-model.eim --disable-camera '
+        f'--model-file /home/msenese/sonos-model.eim --disable-camera --monitor '
         f"--api-key {cfg.EI_API_KEY}'"
     )
 
