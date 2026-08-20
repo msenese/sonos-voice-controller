@@ -47,44 +47,57 @@ device: Raspberry Pis have no clean-shutdown-on-power-loss capability by
 default, so an ungraceful power cycle is a normal, expected event over the
 life of a deployment like this one -- not an edge case.
 
-## Observed frequency (this deployment, 2026-08-07)
+## Observed frequency (this deployment)
 
-Two confirmed occurrences in one evening, both tied to abrupt process
-termination:
+Three confirmed occurrences, two shapes:
 
-1. **~13:41 PDT** -- after a cluster of ~5-6 manual `systemctl restart`
-   calls within a ~4 minute window (routine verification testing, not
-   normal operation). Crash loop went unnoticed/unfixed for several hours
-   until it surfaced as a user-visible symptom (~19:00).
-2. **~19:48 PDT** -- immediately after a single hard power-cycle
-   (physical unplug/replug) of the Pi. Recurred in a cache directory that
-   had only existed for ~45 minutes at that point (rebuilt clean after
-   fixing occurrence #1) -- so this is not something that requires hours
-   of runtime or many restarts to trigger. One abrupt termination was
-   sufficient.
+1. **2026-08-07 ~13:41 PDT** -- zero-byte file, after a cluster of ~5-6
+   manual `systemctl restart` calls within a ~4 minute window (routine
+   verification testing, not normal operation). Crash loop went
+   unnoticed/unfixed for several hours until it surfaced as a
+   user-visible symptom (~19:00).
+2. **2026-08-07 ~19:48 PDT** -- zero-byte file, immediately after a single
+   hard power-cycle (physical unplug/replug) of the Pi. Recurred in a
+   cache directory that had only existed for ~45 minutes at that point
+   (rebuilt clean after fixing occurrence #1) -- one abrupt termination
+   was sufficient, no hours of runtime or many restarts needed.
+3. **2026-08-19** -- a different shape: `ENOENT` on `scandir` for a
+   bucket directory the runner's internal index expected but that didn't
+   exist on disk. Root cause that day was several SD-card image swaps in
+   one session leaving an older on-disk cache snapshot out of sync with
+   what the index expected -- not a crash/power-loss at all. Confirms the
+   underlying fragility (an unvalidated on-disk/index assumption) can be
+   triggered more than one way, not just the two abrupt-termination
+   triggers above.
 
-Sample size is small (2 events), but the mechanism is well understood and
-both triggers (rapid restart, hard power loss) are things that will
-recur over this device's normal lifetime -- this should be assumed to
-happen again, not treated as a one-off.
+The mechanism is well understood, the triggers recur over this device's
+normal lifetime, and evidently more than the two known triggers can hit
+it -- this should be assumed to happen again in some form, not treated as
+fully enumerated.
 
 ## The fix
 
-`services/ei-runner-cache-cleanup.sh` scans for zero-byte `.json` files
-under the monitoring cache and deletes them. It's wired in two ways:
+`services/ei-runner-cache-cleanup.sh`, wired in two ways:
 
-1. **On every `ei-runner.service` start** (`ExecStartPre=`, no age
-   filter) -- since nothing is running yet at that point, any zero-byte
-   file found is unambiguously stale from a previous crashed run, so it's
-   safe to remove immediately. This makes a corrupted cache self-healing
-   on restart instead of crash-looping forever.
+1. **On every `ei-runner.service` start** (`ExecStartPre=`, no
+   `--running` flag) -- unconditionally deletes the entire per-project
+   monitoring cache. Originally this only removed zero-byte files, but
+   after occurrence #3 turned up a corruption shape that wasn't a
+   zero-byte file at all, the startup case was widened to a full wipe:
+   nothing is running yet at that point, so there's no in-progress write
+   to protect, and the whole cache is Edge Impulse's own pending-upload
+   staging data (not project data this repo owns) -- losing whatever
+   hadn't uploaded yet is a trivial cost next to a crash loop that takes
+   down live voice control, not just monitoring. This also covers
+   corruption shapes not yet seen, not just the ones documented above.
 2. **Every 15 minutes while running**
-   (`ei-runner-cache-cleanup.timer` + `.service`, age filter: only files
-   older than 5 minutes) -- catches corruption that happens mid-session
-   without waiting for the next restart. The age filter exists because a
-   genuinely brand-new file might just be mid-write, not corrupted --
-   only files old enough that a normal write would have finished are
-   treated as stale.
+   (`ei-runner-cache-cleanup.timer` + `.service`, `--running` flag) --
+   still only removes zero-byte files older than 5 minutes, same as
+   before. Can't safely wipe everything here since the runner is actively
+   using the directory; this is narrower by necessity, and only catches
+   the zero-byte shape (occurrence #3's shape wasn't observed to happen
+   mid-session, only to surface on a fresh start after external
+   interference with the cache).
 
 Both the static `services/ei-runner.service` template and the dashboard's
 live `_build_ei_runner_unit()` generator include the startup cleanup step.
